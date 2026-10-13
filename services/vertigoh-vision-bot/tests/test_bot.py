@@ -162,17 +162,19 @@ class TestVertigohVisionBot(unittest.IsolatedAsyncioTestCase):
         mock_msg.reply.assert_not_called()
         new_embed = mock_msg.edit.call_args.kwargs["embed"]
         self.assertEqual(new_embed.title, "“Teaser Ep 1”")
-        self.assertEqual(new_embed.fields[1].value, "✅ Resolved in Notion (Edit Pending)")
+        self.assertEqual(new_embed.fields[1].value, "✅ Resolved (Edit Pending)")
         self.assertEqual(new_embed.footer.text, "Resolved via Notion update • Reminders stopped")
 
     def test_resolve_status_from_emoji(self):
         # test emoji mapping
-        self.assertEqual(self.bot.resolve_status_from_emoji("👌"), "Ready to Post")
-        self.assertEqual(self.bot.resolve_status_from_emoji("🆗"), "Ready to Post")
-        self.assertEqual(self.bot.resolve_status_from_emoji("✅"), "Posted")
-        self.assertEqual(self.bot.resolve_status_from_emoji("✏️"), "Edit Pending")
         self.assertEqual(self.bot.resolve_status_from_emoji("👀"), "Review Pending")
-        self.assertEqual(self.bot.resolve_status_from_emoji("📅"), "Scheduled")
+        self.assertEqual(self.bot.resolve_status_from_emoji("🎬"), "Edit Pending")
+        self.assertEqual(self.bot.resolve_status_from_emoji("↗️"), "Ready to Post")
+        self.assertEqual(self.bot.resolve_status_from_emoji("↗"), "Ready to Post")
+        self.assertEqual(self.bot.resolve_status_from_emoji("✅"), "Posted")
+        self.assertIsNone(self.bot.resolve_status_from_emoji("👌"))
+        self.assertIsNone(self.bot.resolve_status_from_emoji("✏️"))
+        self.assertIsNone(self.bot.resolve_status_from_emoji("📅"))
 
     async def test_on_raw_reaction_add_updates_notion(self):
         # test reaction updates notion
@@ -200,7 +202,7 @@ class TestVertigohVisionBot(unittest.IsolatedAsyncioTestCase):
         mock_payload.message_id = 999888
         mock_payload.channel_id = 123
         mock_payload.emoji = MagicMock()
-        mock_payload.emoji.name = "👌"
+        mock_payload.emoji.name = "↗️"
 
         await self.bot.on_raw_reaction_add(mock_payload)
 
@@ -209,9 +211,11 @@ class TestVertigohVisionBot(unittest.IsolatedAsyncioTestCase):
 
     async def test_send_review_alert_format(self):
         # test alert format details
-        from unittest.mock import AsyncMock
+        from unittest.mock import AsyncMock, call
+        mock_msg = MagicMock()
+        mock_msg.add_reaction = AsyncMock()
         mock_channel = MagicMock()
-        mock_channel.send = AsyncMock()
+        mock_channel.send = AsyncMock(return_value=mock_msg)
         self.bot.get_channel = MagicMock(return_value=mock_channel)
 
         await self.bot.send_review_alert(
@@ -235,12 +239,15 @@ class TestVertigohVisionBot(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(embed.url, "https://vimeo.com/summer")
 
         # description has required action and content schedule
-        self.assertIn("Required action: review", embed.description)
+        self.assertIn("Required Action: REVIEW", embed.description)
         self.assertIn("[Content Schedule](https://notion.so/summer)", embed.description)
 
         # status field has hourglass
         self.assertEqual(embed.fields[1].name, "Status")
         self.assertEqual(embed.fields[1].value, "⏳ Review Pending")
+
+        # pre-added reactions
+        mock_msg.add_reaction.assert_has_calls([call("👀"), call("🎬"), call("↗️"), call("✅")])
 
 
 

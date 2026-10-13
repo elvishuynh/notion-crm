@@ -20,52 +20,44 @@ TEAM_ROLE_TO_USERS = {
     "elvis": {"259869751130587137"},
 }
 
+ALERT_REACTION_EMOJIS = ["👀", "🎬", "↗️", "✅"]
+
 EMOJI_TO_STATUS = {
-    # ok to ready to post
-    "👌": "Ready to Post",
-    "🆗": "Ready to Post",
-    "ok_hand": "Ready to Post",
-    "ok": "Ready to Post",
-    # green checkmark to posted
-    "✅": "Posted",
-    "✔️": "Posted",
-    "white_check_mark": "Posted",
-    "heavy_check_mark": "Posted",
-    # edit pending
-    "✏️": "Edit Pending",
-    "✏": "Edit Pending",
-    "📝": "Edit Pending",
-    "✂️": "Edit Pending",
-    "✂": "Edit Pending",
-    "pencil": "Edit Pending",
-    "pencil2": "Edit Pending",
-    "memo": "Edit Pending",
-    "scissors": "Edit Pending",
     # review pending
     "👀": "Review Pending",
-    "🔍": "Review Pending",
-    "🔎": "Review Pending",
-    "🎬": "Review Pending",
     "eyes": "Review Pending",
-    "mag": "Review Pending",
-    "clapper": "Review Pending",
-    # calendar to scheduled
-    "📅": "Scheduled",
-    "🗓️": "Scheduled",
-    "🗓": "Scheduled",
-    "calendar": "Scheduled",
-    "spiral_calendar_pad": "Scheduled",
+    # edit pending
+    "🎬": "Edit Pending",
+    "clapper": "Edit Pending",
+    # ready to post
+    "↗️": "Ready to Post",
+    "↗": "Ready to Post",
+    "\u2197\ufe0f": "Ready to Post",
+    "\u2197": "Ready to Post",
+    "arrow_upper_right": "Ready to Post",
+    # posted
+    "✅": "Posted",
+    "white_check_mark": "Posted",
 }
 
 
 def format_status(status_str: str, is_resolved: bool = False) -> str:
-    # format status with emoji indicator
+    # format status with emoji
     clean = status_str.strip()
+    for prefix in ("✅ ", "⏳ "):
+        if clean.startswith(prefix):
+            clean = clean[len(prefix):].strip()
+
     clean_lower = clean.lower()
     if is_resolved:
         if clean_lower in ("scheduled", "posted", "done", "completed"):
             return f"✅ {clean}"
-        return f"✅ Resolved in Notion ({clean})"
+        if clean_lower.startswith("resolved in notion"):
+            inner = clean[len("resolved in notion"):].strip(" ()")
+            return f"✅ Resolved ({inner})" if inner else "✅ Resolved"
+        if clean_lower.startswith("resolved (") and clean.endswith(")"):
+            return f"✅ {clean}"
+        return f"✅ Resolved ({clean})"
     else:
         return f"⏳ {clean}"
 
@@ -322,6 +314,14 @@ class VertigohVisionBot(commands.Bot):
 
         await self.process_commands(message)
 
+    async def add_alert_reactions(self, msg: discord.Message):
+        # pre-add status action reactions
+        for emoji in ALERT_REACTION_EMOJIS:
+            try:
+                await msg.add_reaction(emoji)
+            except Exception as e:
+                logger.warning("Failed to add reaction %s to message: %s", emoji, e)
+
     # notion review alert
 
     async def send_review_alert(
@@ -346,7 +346,7 @@ class VertigohVisionBot(commands.Bot):
             title=display_title,
             url=asset_url,
             description=(
-                f"Required action: review\n\n"
+                f"Required Action: REVIEW\n\n"
                 f"[Content Schedule]({page_url})"
             ),
             color=0xF1C40F,
@@ -361,6 +361,7 @@ class VertigohVisionBot(commands.Bot):
                 embed=embed,
                 allowed_mentions=discord.AllowedMentions(roles=True, users=True),
             )
+            await self.add_alert_reactions(msg)
             return msg
         except Exception as e:
             logger.error("Failed to send review alert for %s: %s", page_title, e)
@@ -390,7 +391,7 @@ class VertigohVisionBot(commands.Bot):
             title=display_title,
             url=asset_url,
             description=(
-                f"Required action: edit\n\n"
+                f"Required Action: EDIT\n\n"
                 f"[Content Schedule]({page_url})"
             ),
             color=0x3498DB,
@@ -405,6 +406,7 @@ class VertigohVisionBot(commands.Bot):
                 embed=embed,
                 allowed_mentions=discord.AllowedMentions(roles=True, users=True),
             )
+            await self.add_alert_reactions(msg)
             return msg
         except Exception as e:
             logger.error("Failed to send edit alert for %s: %s", page_title, e)
@@ -434,7 +436,7 @@ class VertigohVisionBot(commands.Bot):
             title=display_title,
             url=asset_url,
             description=(
-                f"Required action: post\n\n"
+                f"Required Action: POST\n\n"
                 f"[Content Schedule]({page_url})"
             ),
             color=0x9B59B6,
@@ -449,6 +451,7 @@ class VertigohVisionBot(commands.Bot):
                 embed=embed,
                 allowed_mentions=discord.AllowedMentions(roles=True, users=True),
             )
+            await self.add_alert_reactions(msg)
             return msg
         except Exception as e:
             logger.error("Failed to send ready to post alert for %s: %s", page_title, e)
