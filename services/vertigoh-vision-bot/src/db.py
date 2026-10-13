@@ -184,6 +184,21 @@ class ReviewDatabase:
                 );
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS user_snoozes (
+                    user_id TEXT PRIMARY KEY,
+                    snoozed_until TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_user_snoozes_until 
+                ON user_snoozes (snoozed_until);
+                """
+            )
 
     def count_tracked_assets(self) -> int:
         """Returns the total number of tracked Notion assets."""
@@ -590,6 +605,64 @@ class ReviewDatabase:
                 """,
                 (now_str,),
             )
+
+    # user individual snooze
+
+    def set_user_snooze(self, user_id: str, until_dt: datetime):
+        # set snooze for user
+        now_str = to_iso(get_current_utc())
+        until_str = to_iso(until_dt)
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO user_snoozes (user_id, snoozed_until, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    snoozed_until = excluded.snoozed_until,
+                    updated_at = excluded.updated_at;
+                """,
+                (str(user_id), until_str, now_str),
+            )
+
+    def get_user_snooze(self, user_id: str) -> Optional[datetime]:
+        # get active user snooze
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT snoozed_until FROM user_snoozes WHERE user_id = ?",
+                (str(user_id),),
+            ).fetchone()
+            if not row or not row["snoozed_until"]:
+                return None
+            try:
+                dt = from_iso(row["snoozed_until"])
+                return dt if dt > get_current_utc() else None
+            except Exception:
+                return None
+
+    def is_user_snoozed(self, user_id: str) -> bool:
+        # check user snooze status
+        return self.get_user_snooze(user_id) is not None
+
+    def clear_user_snooze(self, user_id: str):
+        # clear snooze for user
+        with self._get_connection() as conn:
+            conn.execute("DELETE FROM user_snoozes WHERE user_id = ?", (str(user_id),))
+
+    def get_all_active_user_snoozes(self) -> Dict[str, datetime]:
+        # list active user snoozes
+        now_str = to_iso(get_current_utc())
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT user_id, snoozed_until FROM user_snoozes WHERE snoozed_until > ?",
+                (now_str,),
+            ).fetchall()
+            result = {}
+            for r in rows:
+                try:
+                    result[r["user_id"]] = from_iso(r["snoozed_until"])
+                except Exception:
+                    pass
+            return result
 
     # notion items tracking
 

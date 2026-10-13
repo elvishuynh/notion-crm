@@ -8,10 +8,16 @@ from db import ReviewDatabase, get_current_utc
 
 logger = logging.getLogger(__name__)
 
-TEAM_MEMBER_MAP = {
-    "kai": "264314531818242049",
-    "roger": "221159271738376192",
-    "elvis": "259869751130587137",
+TEAM_ROLE_IDS = {
+    "kai": 1559491322157600850,
+    "roger": 1559491699775115274,
+    "elvis": 1559491606653173760,
+}
+
+TEAM_ROLE_TO_USERS = {
+    "kai": {"264314531818242049"},
+    "roger": {"221159271738376192"},
+    "elvis": {"259869751130587137"},
 }
 
 HEART_EMOJIS = set()
@@ -38,31 +44,32 @@ class VertigohVisionBot(commands.Bot):
     def _register_commands(self):
         # register slash commands
 
-        @self.tree.command(name="snooze", description="Snooze bot reminders for 12 hours (or custom hours)")
-        @app_commands.describe(hours="Hours to snooze (default: 12)")
-        async def snooze_slash(interaction: discord.Interaction, hours: Optional[int] = 12):
-            h = hours if (hours and hours > 0) else 12
-            until = get_current_utc() + timedelta(hours=h)
-            self.db.set_snooze(until)
+        @self.tree.command(name="snooze", description="Snooze your reminder pings for 12 hours")
+        async def snooze_slash(interaction: discord.Interaction):
+            until = get_current_utc() + timedelta(hours=12)
+            self.db.set_user_snooze(str(interaction.user.id), until)
             unix_ts = int(until.timestamp())
             await interaction.response.send_message(
-                f"💤 Bot reminders snoozed for **{h} hours** (until <t:{unix_ts}:f>).",
+                f"💤 {interaction.user.mention}, you have snoozed your reminder pings for **12 hours** (until <t:{unix_ts}:f>).",
                 ephemeral=False,
             )
 
-        @self.tree.command(name="unsnooze", description="Cancel active snooze and resume bot reminders immediately")
+        @self.tree.command(name="unsnooze", description="Cancel your snooze and resume reminder pings immediately")
         async def unsnooze_slash(interaction: discord.Interaction):
-            self.db.clear_snooze()
-            await interaction.response.send_message("⏰ Snooze cancelled. Bot reminders resumed.", ephemeral=False)
+            self.db.clear_user_snooze(str(interaction.user.id))
+            await interaction.response.send_message(
+                f"⏰ {interaction.user.mention}, your snooze has been cancelled. Reminders resumed.",
+                ephemeral=False,
+            )
 
-        @self.tree.command(name="status", description="Show active reminders and snooze status")
+        @self.tree.command(name="status", description="Show active reminders and your snooze status")
         async def status_slash(interaction: discord.Interaction):
-            snooze = self.db.get_snooze_until()
-            snooze_txt = f"Active until <t:{int(snooze.timestamp())}:f>" if snooze else "None (Active)"
+            user_snooze = self.db.get_user_snooze(str(interaction.user.id))
+            snooze_txt = f"Active until <t:{int(user_snooze.timestamp())}:f>" if user_snooze else "None (Active)"
             reviews = self.db.get_active_notion_items("REVIEW")
             edits = self.db.get_active_notion_items("EDIT")
             embed = discord.Embed(title="🤖 Vertigoh Vision Bot Status", color=0x3498DB)
-            embed.add_field(name="💤 Snooze", value=snooze_txt, inline=False)
+            embed.add_field(name="💤 Your Snooze", value=snooze_txt, inline=False)
             embed.add_field(name="🎬 Review Pending", value=f"{len(reviews)} active items", inline=True)
             embed.add_field(name="✂️ Edit Pending", value=f"{len(edits)} active items", inline=True)
             await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -142,21 +149,46 @@ class VertigohVisionBot(commands.Bot):
             return user_match["user_id"]
         return ref
 
-    def resolve_mentions(self, names: List[str]) -> str:
-        # convert names to mentions
+    def resolve_role_mentions(self, names: List[str], guild: Optional[discord.Guild] = None) -> str:
+        # resolve names to role mentions
         mentions = []
         for name in names:
             clean = name.strip()
             lower = clean.lower()
-            if lower in TEAM_MEMBER_MAP:
-                mentions.append(f"<@{TEAM_MEMBER_MAP[lower]}>")
-            else:
-                user_match = self.db.find_user_by_name(clean)
-                if user_match:
-                    mentions.append(f"<@{user_match['user_id']}>")
+            if lower in TEAM_ROLE_IDS:
+                mentions.append(f"<@&{TEAM_ROLE_IDS[lower]}>")
+            elif guild:
+                role = discord.utils.find(lambda r: r.name.lower() == lower, guild.roles)
+                if role:
+                    mentions.append(f"<@&{role.id}>")
                 else:
                     mentions.append(f"@{clean}")
+            else:
+                mentions.append(f"@{clean}")
         return " ".join(mentions) if mentions else "@everyone"
+
+    resolve_mentions = resolve_role_mentions
+
+    def is_target_snoozed(self, name: str, guild: Optional[discord.Guild] = None) -> bool:
+        # check if recipient snoozed
+        lower = name.strip().lower()
+        if lower in TEAM_ROLE_TO_USERS:
+            for uid in TEAM_ROLE_TO_USERS[lower]:
+                if self.db.is_user_snoozed(uid):
+                    return True
+
+        if guild:
+            role = discord.utils.find(lambda r: r.name.lower() == lower, guild.roles)
+            if role:
+                for member in role.members:
+                    if self.db.is_user_snoozed(str(member.id)):
+                        return True
+
+        u = self.db.find_user_by_name(name)
+        if u and self.db.is_user_snoozed(u["user_id"]):
+            return True
+
+        return False
 
     async def _get_destination_channel(self, channel_id: int) -> Optional[discord.TextChannel]:
         # get text channel
@@ -184,7 +216,8 @@ class VertigohVisionBot(commands.Bot):
         if not channel:
             return None
 
-        mentions_str = self.resolve_mentions(reviewers)
+        guild = channel.guild if hasattr(channel, "guild") else None
+        mentions_str = self.resolve_role_mentions(reviewers, guild)
         embed = discord.Embed(
             title=f"🎬 Review Pending: {page_title}",
             description="Asset ready for review on Notion schedule board.",
@@ -192,7 +225,7 @@ class VertigohVisionBot(commands.Bot):
         )
         embed.add_field(name="🔗 Asset Link", value=f"[Open Asset Video/Media]({asset_url})", inline=False)
         embed.add_field(name="📋 Notion Board", value=f"[View Notion Page]({page_url})", inline=False)
-        embed.add_field(name="👤 Assigned Reviewer(s)", value=mentions_str, inline=True)
+        embed.add_field(name="👤 Assigned Role(s)", value=mentions_str, inline=True)
         embed.add_field(name="⏳ Status", value="Review Pending", inline=True)
         embed.set_footer(text="Tracked via Notion • Escalating reminders (+12h, +8h, +4h, +2h)")
 
@@ -200,6 +233,7 @@ class VertigohVisionBot(commands.Bot):
             msg = await channel.send(
                 content=f"🔔 {mentions_str} — **{page_title}** is ready for review!",
                 embed=embed,
+                allowed_mentions=discord.AllowedMentions(roles=True, users=True),
             )
             return msg
         except Exception as e:
@@ -221,7 +255,8 @@ class VertigohVisionBot(commands.Bot):
         if not channel:
             return None
 
-        mentions_str = self.resolve_mentions(editors)
+        guild = channel.guild if hasattr(channel, "guild") else None
+        mentions_str = self.resolve_role_mentions(editors, guild)
         embed = discord.Embed(
             title=f"✂️ Edit Pending: {page_title}",
             description="Asset ready for editing on Notion schedule board.",
@@ -229,7 +264,7 @@ class VertigohVisionBot(commands.Bot):
         )
         embed.add_field(name="🔗 Asset Link", value=f"[Open Asset Video/Media]({asset_url})", inline=False)
         embed.add_field(name="📋 Notion Board", value=f"[View Notion Page]({page_url})", inline=False)
-        embed.add_field(name="✏️ Assigned Editor(s)", value=mentions_str, inline=True)
+        embed.add_field(name="✏️ Assigned Role(s)", value=mentions_str, inline=True)
         embed.add_field(name="⏳ Status", value="Edit Pending", inline=True)
         embed.set_footer(text="Tracked via Notion • Daily reminder (every 24h)")
 
@@ -237,6 +272,7 @@ class VertigohVisionBot(commands.Bot):
             msg = await channel.send(
                 content=f"🔔 {mentions_str} — **{page_title}** is ready for edits!",
                 embed=embed,
+                allowed_mentions=discord.AllowedMentions(roles=True, users=True),
             )
             return msg
         except Exception as e:
@@ -261,7 +297,8 @@ class VertigohVisionBot(commands.Bot):
         if not channel:
             return False
 
-        mentions_str = self.resolve_mentions(assigned_users)
+        guild = channel.guild if hasattr(channel, "guild") else None
+        mentions_str = self.resolve_role_mentions(assigned_users, guild)
         cat_upper = category.upper()
 
         if cat_upper == "EDIT":
@@ -290,9 +327,9 @@ class VertigohVisionBot(commands.Bot):
         try:
             try:
                 orig_msg = await channel.fetch_message(message_id)
-                await orig_msg.reply(content=content)
+                await orig_msg.reply(content=content, allowed_mentions=discord.AllowedMentions(roles=True, users=True))
             except Exception:
-                await channel.send(content=content)
+                await channel.send(content=content, allowed_mentions=discord.AllowedMentions(roles=True, users=True))
             return True
         except Exception as e:
             logger.error("Failed to send escalation ping: %s", e)

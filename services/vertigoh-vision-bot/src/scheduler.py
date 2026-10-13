@@ -157,9 +157,9 @@ class ReviewScheduler:
     async def check_escalations_once(self):
         # check overdue escalations
         try:
-            snooze_until = self.db.get_snooze_until()
-            if snooze_until and get_current_utc() < snooze_until:
-                logger.debug("Reminders snoozed until %s", snooze_until)
+            global_snooze = self.db.get_snooze_until()
+            if global_snooze and get_current_utc() < global_snooze:
+                logger.debug("Reminders snoozed until %s", global_snooze)
                 return
 
             due_items = self.db.get_due_notion_items()
@@ -171,7 +171,17 @@ class ReviewScheduler:
                 category = item["category"]
                 assigned = [u.strip() for u in item["assigned_users"].split(",") if u.strip()]
 
-                logger.info("Escalating %s (%s stage %d overdue)", tracking_id, category, stage)
+                channel = self.bot.get_channel(channel_id)
+                guild = channel.guild if channel and hasattr(channel, "guild") else None
+
+                # filter out snoozed recipients
+                active_targets = [u for u in assigned if not self.bot.is_target_snoozed(u, guild)]
+
+                if not active_targets:
+                    logger.debug("All assigned targets for %s are snoozed, skipping ping", tracking_id)
+                    continue
+
+                logger.info("Escalating %s (%s stage %d to %s)", tracking_id, category, stage, active_targets)
                 success = await self.bot.send_notion_escalation(
                     channel_id=channel_id,
                     message_id=message_id,
@@ -180,7 +190,7 @@ class ReviewScheduler:
                     page_title=item["page_title"],
                     asset_url=item["asset_url"],
                     page_url=item["page_url"],
-                    assigned_users=assigned,
+                    assigned_users=active_targets,
                 )
                 if success:
                     updated = self.db.advance_notion_item_stage(tracking_id)

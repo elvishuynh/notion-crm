@@ -200,6 +200,25 @@ class TestReviewDatabase(unittest.TestCase):
         self.db.clear_snooze()
         self.assertIsNone(self.db.get_snooze_until())
 
+    def test_user_snooze(self):
+        # test user individual snooze
+        self.assertFalse(self.db.is_user_snoozed("user_1"))
+        until = datetime.now(timezone.utc) + timedelta(hours=12)
+        self.db.set_user_snooze("user_1", until)
+        self.assertTrue(self.db.is_user_snoozed("user_1"))
+        self.assertFalse(self.db.is_user_snoozed("user_2"))
+
+        active = self.db.get_user_snooze("user_1")
+        self.assertIsNotNone(active)
+
+        self.db.clear_user_snooze("user_1")
+        self.assertFalse(self.db.is_user_snoozed("user_1"))
+
+        # expired snooze returns false
+        expired = datetime.now(timezone.utc) - timedelta(hours=1)
+        self.db.set_user_snooze("user_3", expired)
+        self.assertFalse(self.db.is_user_snoozed("user_3"))
+
     def test_notion_item_lifecycle(self):
         t0 = datetime(2026, 10, 12, 0, 0, 0, tzinfo=timezone.utc)
         item = self.db.record_notion_item(

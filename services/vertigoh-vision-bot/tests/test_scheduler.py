@@ -15,6 +15,8 @@ class TestReviewScheduler(unittest.IsolatedAsyncioTestCase):
         self.db = ReviewDatabase(self.db_path)
 
         self.mock_bot = MagicMock()
+        self.mock_bot.is_target_snoozed = MagicMock(return_value=False)
+        self.mock_bot.get_channel = MagicMock(return_value=None)
         self.mock_bot.send_review_alert = AsyncMock()
         self.mock_bot.send_edit_alert = AsyncMock()
         self.mock_bot.send_notion_escalation = AsyncMock()
@@ -251,6 +253,57 @@ class TestReviewScheduler(unittest.IsolatedAsyncioTestCase):
 
         # activate snooze
         self.db.set_snooze(datetime.now(timezone.utc) + timedelta(hours=12))
+
+        await self.scheduler.check_escalations_once()
+        self.mock_bot.send_notion_escalation.assert_not_called()
+
+    async def test_check_escalations_per_user_snooze_partial(self):
+        # partial snooze keeps active
+        t_past = datetime.now(timezone.utc) - timedelta(hours=13)
+        self.db.record_notion_item(
+            notion_page_id="page_partial_snooze",
+            category="REVIEW",
+            page_title="Partial Snooze Clip",
+            asset_url="https://vimeo.com/partial",
+            notion_status="Review Pending",
+            assigned_users="Roger,Kai",
+            discord_channel_id=987654,
+            discord_message_id=777004,
+            initial_time=t_past,
+        )
+
+        self.mock_bot.is_target_snoozed.side_effect = lambda u, guild: u == "Roger"
+        self.mock_bot.send_notion_escalation.return_value = True
+
+        await self.scheduler.check_escalations_once()
+
+        self.mock_bot.send_notion_escalation.assert_called_once_with(
+            channel_id=987654,
+            message_id=777004,
+            stage=0,
+            category="REVIEW",
+            page_title="Partial Snooze Clip",
+            asset_url="https://vimeo.com/partial",
+            page_url="",
+            assigned_users=["Kai"],
+        )
+
+    async def test_check_escalations_per_user_snooze_all(self):
+        # all snoozed skips ping
+        t_past = datetime.now(timezone.utc) - timedelta(hours=13)
+        self.db.record_notion_item(
+            notion_page_id="page_all_snooze",
+            category="REVIEW",
+            page_title="All Snoozed Clip",
+            asset_url="https://vimeo.com/all_snoozed",
+            notion_status="Review Pending",
+            assigned_users="Roger,Kai",
+            discord_channel_id=987654,
+            discord_message_id=777005,
+            initial_time=t_past,
+        )
+
+        self.mock_bot.is_target_snoozed.return_value = True
 
         await self.scheduler.check_escalations_once()
         self.mock_bot.send_notion_escalation.assert_not_called()
