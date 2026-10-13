@@ -4,9 +4,6 @@ on:
   push:
     branches:
       - main
-    paths:
-      - 'services/vertigoh-vision-bot/**'
-      - '.github/workflows/docker-publish.yml'
   workflow_dispatch:
 
 permissions:
@@ -43,7 +40,8 @@ jobs:
       - name: Build and push
         uses: docker/build-push-action@v5
         with:
-          context: services/vertigoh-vision-bot
+          context: ./services/vertigoh-vision-bot
+          file: ./services/vertigoh-vision-bot/Dockerfile
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
