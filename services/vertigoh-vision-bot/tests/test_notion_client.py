@@ -84,6 +84,28 @@ class TestNotionClient(unittest.TestCase):
         title = self.client.extract_page_title(props)
         self.assertEqual(title, "YouTube Shorts Episode 12")
 
+    def test_extract_names_list_uploader_plural(self):
+        # test extract uploaders plural
+        props = {
+            "Uploaders": {
+                "type": "people",
+                "people": [{"name": "Elvis"}, {"name": "Kai"}],
+            }
+        }
+        names = self.client.extract_names_list(props, "uploader")
+        self.assertEqual(names, ["Elvis", "Kai"])
+
+    def test_extract_names_list_uploader_singular(self):
+        # test extract uploader singular
+        props = {
+            "Uploader": {
+                "type": "select",
+                "select": {"name": "Roger"},
+            }
+        }
+        names = self.client.extract_names_list(props, "uploader")
+        self.assertEqual(names, ["Roger"])
+
     @patch.object(NotionClient, "_request")
     def test_query_assets_database(self, mock_request):
         self.client.database_id = "test_db_id"
@@ -100,6 +122,10 @@ class TestNotionClient(unittest.TestCase):
                         "Assets": {
                             "type": "url",
                             "url": "https://vimeo.com/123456",
+                        },
+                        "Uploader": {
+                            "type": "select",
+                            "select": {"name": "Elvis"},
                         },
                     },
                 },
@@ -126,6 +152,7 @@ class TestNotionClient(unittest.TestCase):
         self.assertEqual(results[0]["notion_page_id"], "row_1")
         self.assertEqual(results[0]["page_title"], "Podcast Clip Five")
         self.assertEqual(results[0]["asset_url"], "https://vimeo.com/123456")
+        self.assertEqual(results[0]["uploaders"], ["Elvis"])
 
 
 if __name__ == "__main__":

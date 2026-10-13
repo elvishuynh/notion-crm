@@ -68,10 +68,12 @@ class VertigohVisionBot(commands.Bot):
             snooze_txt = f"Active until <t:{int(user_snooze.timestamp())}:f>" if user_snooze else "None (Active)"
             reviews = self.db.get_active_notion_items("REVIEW")
             edits = self.db.get_active_notion_items("EDIT")
+            posts = self.db.get_active_notion_items("POST")
             embed = discord.Embed(title="🤖 Vertigoh Vision Bot Status", color=0x3498DB)
             embed.add_field(name="💤 Your Snooze", value=snooze_txt, inline=False)
             embed.add_field(name="🎬 Review Pending", value=f"{len(reviews)} active items", inline=True)
             embed.add_field(name="✂️ Edit Pending", value=f"{len(edits)} active items", inline=True)
+            embed.add_field(name="🚀 Ready to Post", value=f"{len(posts)} active items", inline=True)
             await interaction.response.send_message(embed=embed, ephemeral=True)
 
         @self.tree.command(
@@ -279,6 +281,45 @@ class VertigohVisionBot(commands.Bot):
             logger.error("Failed to send edit alert for %s: %s", page_title, e)
             return None
 
+    # notion ready to post alert
+
+    async def send_ready_to_post_alert(
+        self,
+        channel_id: int,
+        page_title: str,
+        asset_url: str,
+        page_url: str,
+        uploaders: List[str],
+    ) -> Optional[discord.Message]:
+        # post ready to post alert
+        channel = await self._get_destination_channel(channel_id)
+        if not channel:
+            return None
+
+        guild = channel.guild if hasattr(channel, "guild") else None
+        mentions_str = self.resolve_role_mentions(uploaders, guild)
+        embed = discord.Embed(
+            title=f"🚀 Ready to Post: {page_title}",
+            description="Asset is approved and ready to post on Notion schedule board.",
+            color=0x9B59B6,
+        )
+        embed.add_field(name="🔗 Asset Link", value=f"[Open Asset Video/Media]({asset_url})", inline=False)
+        embed.add_field(name="📋 Notion Board", value=f"[View Notion Page]({page_url})", inline=False)
+        embed.add_field(name="📤 Assigned Role(s)", value=mentions_str, inline=True)
+        embed.add_field(name="⏳ Status", value="Ready to Post", inline=True)
+        embed.set_footer(text="Tracked via Notion • Daily reminder (every 24h) until Scheduled")
+
+        try:
+            msg = await channel.send(
+                content=f"🔔 {mentions_str} — **{page_title}** is ready to post!",
+                embed=embed,
+                allowed_mentions=discord.AllowedMentions(roles=True, users=True),
+            )
+            return msg
+        except Exception as e:
+            logger.error("Failed to send ready to post alert for %s: %s", page_title, e)
+            return None
+
     # notion escalation pings
 
     async def send_notion_escalation(
@@ -304,6 +345,12 @@ class VertigohVisionBot(commands.Bot):
         if cat_upper == "EDIT":
             content = (
                 f"⏰ **[24h Edit Reminder #{stage + 1}]** {mentions_str} — **{page_title}** is still pending edits!\n"
+                f"🔗 **Asset**: {asset_url}\n"
+                f"📋 **Notion**: {page_url}"
+            )
+        elif cat_upper in ("POST", "READY_TO_POST"):
+            content = (
+                f"🚀 **[24h Ready to Post Reminder #{stage + 1}]** {mentions_str} — **{page_title}** is ready to post!\n"
                 f"🔗 **Asset**: {asset_url}\n"
                 f"📋 **Notion**: {page_url}"
             )
@@ -354,7 +401,13 @@ class VertigohVisionBot(commands.Bot):
             orig_msg = await channel.fetch_message(message_id)
             if orig_msg and orig_msg.embeds:
                 old_embed = orig_msg.embeds[0]
-                prefix = "🎬" if category.upper() == "REVIEW" else "✂️"
+                cat_norm = category.upper()
+                if cat_norm == "REVIEW":
+                    prefix = "🎬"
+                elif cat_norm == "EDIT":
+                    prefix = "✂️"
+                else:
+                    prefix = "🚀"
                 new_embed = discord.Embed(
                     title=f"{prefix} [Resolved] {page_title}",
                     description=old_embed.description,

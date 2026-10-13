@@ -19,6 +19,7 @@ class TestReviewScheduler(unittest.IsolatedAsyncioTestCase):
         self.mock_bot.get_channel = MagicMock(return_value=None)
         self.mock_bot.send_review_alert = AsyncMock()
         self.mock_bot.send_edit_alert = AsyncMock()
+        self.mock_bot.send_ready_to_post_alert = AsyncMock()
         self.mock_bot.send_notion_escalation = AsyncMock()
         self.mock_bot.update_resolved_message = AsyncMock()
         self.mock_bot.send_custom_escalation_ping = AsyncMock()
@@ -171,6 +172,95 @@ class TestReviewScheduler(unittest.IsolatedAsyncioTestCase):
             current_status="Ready to post",
         )
 
+    async def test_poll_notion_ready_to_post(self):
+        # test ready to post alert
+        self.mock_notion.query_assets_database.return_value = [
+            {
+                "notion_page_id": "page_post_1",
+                "page_title": "Final Clip Ready",
+                "asset_url": "https://vimeo.com/post1",
+                "page_url": "https://notion.so/post_1",
+                "status": "Ready to Post",
+                "reviewers": [],
+                "editors": [],
+                "uploaders": ["Elvis"],
+            }
+        ]
+        mock_msg = MagicMock()
+        mock_msg.id = 777099
+        self.mock_bot.send_ready_to_post_alert.return_value = mock_msg
+
+        await self.scheduler.poll_notion_once()
+
+        self.mock_bot.send_ready_to_post_alert.assert_called_once_with(
+            channel_id=987654,
+            page_title="Final Clip Ready",
+            asset_url="https://vimeo.com/post1",
+            page_url="https://notion.so/post_1",
+            uploaders=["Elvis"],
+        )
+
+        item = self.db.get_notion_item("page_post_1:POST")
+        self.assertIsNotNone(item)
+        self.assertEqual(item["category"], "POST")
+        self.assertEqual(item["status"], "PENDING")
+
+    async def test_poll_notion_ready_to_post_empty_uploader_skipped(self):
+        # test skip empty uploader
+        self.mock_notion.query_assets_database.return_value = [
+            {
+                "notion_page_id": "page_post_no_uploader",
+                "page_title": "Clip Without Uploader",
+                "asset_url": "https://vimeo.com/post2",
+                "page_url": "https://notion.so/post_2",
+                "status": "Ready to Post",
+                "reviewers": [],
+                "editors": [],
+                "uploaders": [],
+            }
+        ]
+        await self.scheduler.poll_notion_once()
+        self.mock_bot.send_ready_to_post_alert.assert_not_called()
+        self.assertIsNone(self.db.get_notion_item("page_post_no_uploader:POST"))
+
+    async def test_poll_notion_ready_to_post_resolves_when_scheduled(self):
+        # test resolves on scheduled
+        self.db.record_notion_item(
+            notion_page_id="page_post_sched",
+            category="POST",
+            page_title="Clip Being Scheduled",
+            asset_url="https://vimeo.com/post3",
+            notion_status="Ready to Post",
+            assigned_users="Elvis",
+            discord_channel_id=987654,
+            discord_message_id=777100,
+        )
+
+        self.mock_notion.query_assets_database.return_value = [
+            {
+                "notion_page_id": "page_post_sched",
+                "page_title": "Clip Being Scheduled",
+                "asset_url": "https://vimeo.com/post3",
+                "page_url": "https://notion.so/post_3",
+                "status": "Scheduled",
+                "reviewers": [],
+                "editors": [],
+                "uploaders": ["Elvis"],
+            }
+        ]
+
+        await self.scheduler.poll_notion_once()
+
+        item = self.db.get_notion_item("page_post_sched:POST")
+        self.assertEqual(item["status"], "RESOLVED")
+        self.mock_bot.update_resolved_message.assert_called_once_with(
+            channel_id=987654,
+            message_id=777100,
+            page_title="Clip Being Scheduled",
+            category="POST",
+            current_status="Scheduled",
+        )
+
     async def test_check_escalations_due_review(self):
         t_past = datetime.now(timezone.utc) - timedelta(hours=13)
         self.db.record_notion_item(
@@ -235,6 +325,40 @@ class TestReviewScheduler(unittest.IsolatedAsyncioTestCase):
         )
 
         updated = self.db.get_notion_item("page_overdue_edit:EDIT")
+        self.assertEqual(updated["stage"], 1)
+
+    async def test_check_escalations_due_post_24h(self):
+        # test post 24h escalation
+        t_past = datetime.now(timezone.utc) - timedelta(hours=25)
+        self.db.record_notion_item(
+            notion_page_id="page_overdue_post",
+            category="POST",
+            page_title="Overdue Post Clip",
+            asset_url="https://vimeo.com/due_post",
+            notion_status="Ready to Post",
+            assigned_users="Elvis",
+            discord_channel_id=987654,
+            discord_message_id=777009,
+            page_url="https://notion.so/due_post",
+            initial_time=t_past,
+        )
+
+        self.mock_bot.send_notion_escalation.return_value = True
+
+        await self.scheduler.check_escalations_once()
+
+        self.mock_bot.send_notion_escalation.assert_called_once_with(
+            channel_id=987654,
+            message_id=777009,
+            stage=0,
+            category="POST",
+            page_title="Overdue Post Clip",
+            asset_url="https://vimeo.com/due_post",
+            page_url="https://notion.so/due_post",
+            assigned_users=["Elvis"],
+        )
+
+        updated = self.db.get_notion_item("page_overdue_post:POST")
         self.assertEqual(updated["stage"], 1)
 
     async def test_snooze_skips_escalations(self):

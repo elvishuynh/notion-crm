@@ -184,10 +184,11 @@ class NotionClient:
         return ""
 
     def extract_names_list(self, page_properties: Dict[str, Any], prop_name: str) -> List[str]:
-        # extract reviewers or editors
+        # extract person property values
         target = prop_name.strip().lower()
+        targets = {target, target + "s", target.rstrip("s")}
         for key, prop in page_properties.items():
-            if key.strip().lower() == target:
+            if key.strip().lower() in targets:
                 ptype = prop.get("type")
                 if ptype == "multi_select":
                     return [o.get("name", "").strip() for o in prop.get("multi_select", []) if o.get("name")]
@@ -226,6 +227,7 @@ class NotionClient:
                     status = self.extract_status(props)
                     reviewers = self.extract_names_list(props, "reviewer")
                     editors = self.extract_names_list(props, "editor")
+                    uploaders = self.extract_names_list(props, "uploader")
 
                     results.append(
                         {
@@ -236,6 +238,7 @@ class NotionClient:
                             "status": status,
                             "reviewers": reviewers,
                             "editors": editors,
+                            "uploaders": uploaders,
                         }
                     )
 

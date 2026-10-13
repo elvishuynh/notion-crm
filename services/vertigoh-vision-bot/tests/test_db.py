@@ -247,6 +247,37 @@ class TestReviewDatabase(unittest.TestCase):
         self.assertEqual(res["status"], "RESOLVED")
         self.assertEqual(len(self.db.get_active_notion_items("REVIEW")), 0)
 
+    def test_notion_item_post_lifecycle(self):
+        # test post lifecycle 24h
+        t0 = datetime(2026, 10, 12, 0, 0, 0, tzinfo=timezone.utc)
+        item = self.db.record_notion_item(
+            notion_page_id="page_post_db",
+            category="POST",
+            page_title="Ready Clip",
+            asset_url="https://vimeo.com/post_db",
+            notion_status="Ready to Post",
+            assigned_users="Elvis",
+            discord_channel_id=111,
+            discord_message_id=444,
+            initial_time=t0,
+        )
+        self.assertEqual(item["tracking_id"], "page_post_db:POST")
+        self.assertEqual(item["category"], "POST")
+        self.assertEqual(item["stage"], 0)
+        self.assertEqual(from_iso(item["next_ping_at"]), t0 + timedelta(hours=24))
+
+        # advance stage 24h
+        adv = self.db.advance_notion_item_stage("page_post_db:POST", ping_time=t0 + timedelta(hours=24))
+        self.assertEqual(adv["stage"], 1)
+        self.assertEqual(from_iso(adv["next_ping_at"]), t0 + timedelta(hours=48))
+
+        active_posts = self.db.get_active_notion_items("POST")
+        self.assertEqual(len(active_posts), 1)
+
+        res = self.db.mark_notion_item_resolved("page_post_db:POST")
+        self.assertEqual(res["status"], "RESOLVED")
+        self.assertEqual(len(self.db.get_active_notion_items("POST")), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

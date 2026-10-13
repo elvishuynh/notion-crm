@@ -684,7 +684,7 @@ class ReviewDatabase:
         now = initial_time or get_current_utc()
         now_str = to_iso(now)
         cat_upper = category.upper()
-        if cat_upper == "EDIT":
+        if cat_upper in ("EDIT", "POST", "READY_TO_POST"):
             next_ping = calculate_edit_next_ping(stage=0, base_time=now)
         else:
             next_ping = calculate_review_next_ping(stage=0, base_time=now)
@@ -782,7 +782,7 @@ class ReviewDatabase:
 
         now = ping_time or get_current_utc()
         next_stage = item["stage"] + 1
-        if item["category"] == "EDIT":
+        if item["category"] in ("EDIT", "POST", "READY_TO_POST"):
             next_ping = calculate_edit_next_ping(stage=next_stage, base_time=now)
         else:
             next_ping = calculate_review_next_ping(stage=next_stage, base_time=now)

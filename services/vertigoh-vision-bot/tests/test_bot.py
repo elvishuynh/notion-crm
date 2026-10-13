@@ -8,7 +8,7 @@ from db import ReviewDatabase
 from bot import VertigohVisionBot, TEAM_ROLE_IDS
 
 
-class TestVertigohVisionBot(unittest.TestCase):
+class TestVertigohVisionBot(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.db_path = str(Path(self.temp_dir.name) / "test_bot.db")
@@ -70,6 +70,55 @@ class TestVertigohVisionBot(unittest.TestCase):
 
         # kai should not be affected
         self.assertFalse(self.bot.is_target_snoozed("Kai"))
+
+    async def test_send_ready_to_post_alert(self):
+        # test ready to post alert
+        mock_channel = MagicMock()
+        mock_channel.send = MagicMock()
+        from unittest.mock import AsyncMock
+        mock_channel.send = AsyncMock()
+        self.bot.get_channel = MagicMock(return_value=mock_channel)
+
+        await self.bot.send_ready_to_post_alert(
+            channel_id=12345,
+            page_title="Teaser Ep 1",
+            asset_url="https://vimeo.com/teaser1",
+            page_url="https://notion.so/teaser1",
+            uploaders=["Elvis"],
+        )
+
+        mock_channel.send.assert_called_once()
+        call_kwargs = mock_channel.send.call_args.kwargs
+        self.assertIn("Teaser Ep 1", call_kwargs["content"])
+        self.assertIn(f"<@&{TEAM_ROLE_IDS['elvis']}>", call_kwargs["content"])
+        embed = call_kwargs["embed"]
+        self.assertEqual(embed.title, "🚀 Ready to Post: Teaser Ep 1")
+
+    async def test_send_notion_escalation_post(self):
+        # test post escalation content
+        mock_channel = MagicMock()
+        mock_msg = MagicMock()
+        from unittest.mock import AsyncMock
+        mock_msg.reply = AsyncMock()
+        mock_channel.fetch_message = AsyncMock(return_value=mock_msg)
+        self.bot.get_channel = MagicMock(return_value=mock_channel)
+
+        success = await self.bot.send_notion_escalation(
+            channel_id=12345,
+            message_id=999,
+            stage=0,
+            category="POST",
+            page_title="Teaser Ep 1",
+            asset_url="https://vimeo.com/teaser1",
+            page_url="https://notion.so/teaser1",
+            assigned_users=["Elvis"],
+        )
+
+        self.assertTrue(success)
+        mock_msg.reply.assert_called_once()
+        reply_content = mock_msg.reply.call_args.kwargs["content"]
+        self.assertIn("[24h Ready to Post Reminder #1]", reply_content)
+        self.assertIn(f"<@&{TEAM_ROLE_IDS['elvis']}>", reply_content)
 
 
 if __name__ == "__main__":

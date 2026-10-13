@@ -54,6 +54,7 @@ class ReviewScheduler:
                 curr_asset = item.get("asset_url", "").strip()
                 reviewers = item.get("reviewers", [])
                 editors = item.get("editors", [])
+                uploaders = item.get("uploaders", [])
 
                 if category == "REVIEW":
                     # verify review conditions
@@ -87,6 +88,23 @@ class ReviewScheduler:
                         )
                         logger.info("Edit resolved for '%s' (status: %s)", active["page_title"], curr_status)
 
+                elif category == "POST":
+                    # verify post conditions
+                    is_ready_to_post = curr_status.lower() == "ready to post"
+                    is_scheduled = curr_status.lower() == "scheduled"
+                    has_asset = bool(curr_asset)
+                    has_uploader = len(uploaders) > 0
+                    if is_scheduled or not (is_ready_to_post and has_asset and has_uploader):
+                        self.db.mark_notion_item_resolved(tracking_id)
+                        await self.bot.update_resolved_message(
+                            channel_id=active["discord_channel_id"] or self.channel_id,
+                            message_id=active["discord_message_id"],
+                            page_title=active["page_title"],
+                            category="POST",
+                            current_status=curr_status or "Updated",
+                        )
+                        logger.info("Post resolved for '%s' (status: %s)", active["page_title"], curr_status)
+
             # check new alerts
             for item in items:
                 page_id = item["notion_page_id"]
@@ -97,6 +115,7 @@ class ReviewScheduler:
                 status_lower = status.lower()
                 reviewers = item["reviewers"]
                 editors = item["editors"]
+                uploaders = item.get("uploaders", [])
 
                 # check review pending
                 matched_reviewers = [r for r in reviewers if r.lower() in REVIEW_TARGETS]
@@ -150,6 +169,32 @@ class ReviewScheduler:
                                 page_url=page_url,
                             )
                             logger.info("Dispatched edit alert for '%s' (msg: %s)", title, msg.id)
+
+                # check ready to post
+                if status_lower == "ready to post" and asset_url and uploaders:
+                    tracking_id = f"{page_id}:POST"
+                    existing = self.db.get_notion_item(tracking_id)
+                    if not existing or existing["status"] != "PENDING":
+                        msg = await self.bot.send_ready_to_post_alert(
+                            channel_id=self.channel_id,
+                            page_title=title,
+                            asset_url=asset_url,
+                            page_url=page_url,
+                            uploaders=uploaders,
+                        )
+                        if msg:
+                            self.db.record_notion_item(
+                                notion_page_id=page_id,
+                                category="POST",
+                                page_title=title,
+                                asset_url=asset_url,
+                                notion_status=status,
+                                assigned_users=",".join(uploaders),
+                                discord_channel_id=self.channel_id,
+                                discord_message_id=msg.id,
+                                page_url=page_url,
+                            )
+                            logger.info("Dispatched ready to post alert for '%s' (msg: %s)", title, msg.id)
 
         except Exception as e:
             logger.error("Error during Notion poll tick: %s", e)
