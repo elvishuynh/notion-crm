@@ -161,8 +161,87 @@ class TestVertigohVisionBot(unittest.IsolatedAsyncioTestCase):
         mock_msg.edit.assert_called_once()
         mock_msg.reply.assert_not_called()
         new_embed = mock_msg.edit.call_args.kwargs["embed"]
-        self.assertEqual(new_embed.title, "[Resolved] “Teaser Ep 1”")
+        self.assertEqual(new_embed.title, "“Teaser Ep 1”")
+        self.assertEqual(new_embed.fields[1].value, "✅ Resolved in Notion (Edit Pending)")
         self.assertEqual(new_embed.footer.text, "Resolved via Notion update • Reminders stopped")
+
+    def test_resolve_status_from_emoji(self):
+        # test emoji mapping
+        self.assertEqual(self.bot.resolve_status_from_emoji("👌"), "Ready to Post")
+        self.assertEqual(self.bot.resolve_status_from_emoji("🆗"), "Ready to Post")
+        self.assertEqual(self.bot.resolve_status_from_emoji("✅"), "Posted")
+        self.assertEqual(self.bot.resolve_status_from_emoji("✏️"), "Edit Pending")
+        self.assertEqual(self.bot.resolve_status_from_emoji("👀"), "Review Pending")
+        self.assertEqual(self.bot.resolve_status_from_emoji("📅"), "Scheduled")
+
+    async def test_on_raw_reaction_add_updates_notion(self):
+        # test reaction updates notion
+        from unittest.mock import AsyncMock
+        mock_notion = MagicMock()
+        mock_notion.update_page_status = MagicMock(return_value=True)
+        self.bot.notion = mock_notion
+        mock_scheduler = MagicMock()
+        mock_scheduler.poll_notion_once = AsyncMock()
+        self.bot.scheduler = mock_scheduler
+
+        self.db.record_notion_item(
+            notion_page_id="page_react_1",
+            category="REVIEW",
+            page_title="Reel To Post",
+            asset_url="https://vimeo.com/react",
+            notion_status="Review Pending",
+            assigned_users="Elvis",
+            discord_channel_id=123,
+            discord_message_id=999888,
+        )
+
+        mock_payload = MagicMock()
+        mock_payload.user_id = 111222
+        mock_payload.message_id = 999888
+        mock_payload.channel_id = 123
+        mock_payload.emoji = MagicMock()
+        mock_payload.emoji.name = "👌"
+
+        await self.bot.on_raw_reaction_add(mock_payload)
+
+        mock_notion.update_page_status.assert_called_once_with("page_react_1", "Ready to Post")
+        mock_scheduler.poll_notion_once.assert_called_once()
+
+    async def test_send_review_alert_format(self):
+        # test alert format details
+        from unittest.mock import AsyncMock
+        mock_channel = MagicMock()
+        mock_channel.send = AsyncMock()
+        self.bot.get_channel = MagicMock(return_value=mock_channel)
+
+        await self.bot.send_review_alert(
+            channel_id=123,
+            page_title="Summer Campaign",
+            asset_url="https://vimeo.com/summer",
+            page_url="https://notion.so/summer",
+            reviewers=["Roger"],
+        )
+
+        call_args = mock_channel.send.call_args
+        content = call_args.kwargs["content"]
+        embed = call_args.kwargs["embed"]
+
+        # no exclamation mark outside embed
+        self.assertFalse(content.endswith("!"))
+        self.assertIn("is ready for review", content)
+
+        # title links to asset
+        self.assertEqual(embed.title, "“Summer Campaign”")
+        self.assertEqual(embed.url, "https://vimeo.com/summer")
+
+        # description has required action and content schedule
+        self.assertIn("Required action: review", embed.description)
+        self.assertIn("[Content Schedule](https://notion.so/summer)", embed.description)
+
+        # status field has hourglass
+        self.assertEqual(embed.fields[1].name, "Status")
+        self.assertEqual(embed.fields[1].value, "⏳ Review Pending")
+
 
 
 

@@ -20,6 +20,56 @@ TEAM_ROLE_TO_USERS = {
     "elvis": {"259869751130587137"},
 }
 
+EMOJI_TO_STATUS = {
+    # ok to ready to post
+    "👌": "Ready to Post",
+    "🆗": "Ready to Post",
+    "ok_hand": "Ready to Post",
+    "ok": "Ready to Post",
+    # green checkmark to posted
+    "✅": "Posted",
+    "✔️": "Posted",
+    "white_check_mark": "Posted",
+    "heavy_check_mark": "Posted",
+    # edit pending
+    "✏️": "Edit Pending",
+    "✏": "Edit Pending",
+    "📝": "Edit Pending",
+    "✂️": "Edit Pending",
+    "✂": "Edit Pending",
+    "pencil": "Edit Pending",
+    "pencil2": "Edit Pending",
+    "memo": "Edit Pending",
+    "scissors": "Edit Pending",
+    # review pending
+    "👀": "Review Pending",
+    "🔍": "Review Pending",
+    "🔎": "Review Pending",
+    "🎬": "Review Pending",
+    "eyes": "Review Pending",
+    "mag": "Review Pending",
+    "clapper": "Review Pending",
+    # calendar to scheduled
+    "📅": "Scheduled",
+    "🗓️": "Scheduled",
+    "🗓": "Scheduled",
+    "calendar": "Scheduled",
+    "spiral_calendar_pad": "Scheduled",
+}
+
+
+def format_status(status_str: str, is_resolved: bool = False) -> str:
+    # format status with emoji indicator
+    clean = status_str.strip()
+    clean_lower = clean.lower()
+    if is_resolved:
+        if clean_lower in ("scheduled", "posted", "done", "completed"):
+            return f"✅ {clean}"
+        return f"✅ Resolved in Notion ({clean})"
+    else:
+        return f"⏳ {clean}"
+
+
 HEART_EMOJIS = set()
 
 
@@ -29,16 +79,20 @@ class VertigohVisionBot(commands.Bot):
         db: ReviewDatabase,
         reviewer_id: str,
         guild_id: Optional[int] = None,
+        notion: Optional[Any] = None,
         *args,
         **kwargs,
     ):
         intents = discord.Intents.default()
         intents.message_content = True
         intents.members = True
+        intents.reactions = True
         super().__init__(command_prefix="!", intents=intents, *args, **kwargs)
         self.db = db
         self.reviewer_id = reviewer_id
         self.guild_id = guild_id
+        self.notion = notion
+        self.scheduler = None
         self._register_commands()
 
     def _register_commands(self):
@@ -203,6 +257,71 @@ class VertigohVisionBot(commands.Bot):
                 return None
         return channel
 
+    def resolve_status_from_emoji(self, emoji_val: str) -> Optional[str]:
+        # resolve emoji string to status
+        clean = emoji_val.strip()
+        if clean in EMOJI_TO_STATUS:
+            return EMOJI_TO_STATUS[clean]
+        no_colon = clean.strip(":")
+        if no_colon in EMOJI_TO_STATUS:
+            return EMOJI_TO_STATUS[no_colon]
+        return None
+
+    async def apply_status_update(self, page_id: str, new_status: str):
+        # update notion status and reconcile
+        if not self.notion:
+            return False
+
+        success = self.notion.update_page_status(page_id, new_status)
+        if success and self.scheduler:
+            await self.scheduler.poll_notion_once()
+        return success
+
+    async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
+        # handle reaction to alert message
+        if self.user and payload.user_id == self.user.id:
+            return
+
+        emoji_str = str(payload.emoji.name) if payload.emoji.name else str(payload.emoji)
+        target_status = self.resolve_status_from_emoji(emoji_str)
+        if not target_status:
+            return
+
+        item = self.db.get_notion_item_by_message_id(payload.message_id)
+        if not item:
+            return
+
+        logger.info(
+            "Reaction '%s' on message %d: updating Notion page %s status to '%s'",
+            emoji_str,
+            payload.message_id,
+            item["notion_page_id"],
+            target_status,
+        )
+        await self.apply_status_update(item["notion_page_id"], target_status)
+
+    async def on_message(self, message: discord.Message):
+        # handle reply with emoji
+        if self.user and message.author.id == self.user.id:
+            return
+
+        if message.reference and message.reference.message_id:
+            cleaned = message.content.strip()
+            target_status = self.resolve_status_from_emoji(cleaned)
+            if target_status:
+                item = self.db.get_notion_item_by_message_id(message.reference.message_id)
+                if item:
+                    logger.info(
+                        "Reply '%s' on message %d: updating Notion page %s status to '%s'",
+                        cleaned,
+                        message.reference.message_id,
+                        item["notion_page_id"],
+                        target_status,
+                    )
+                    await self.apply_status_update(item["notion_page_id"], target_status)
+
+        await self.process_commands(message)
+
     # notion review alert
 
     async def send_review_alert(
@@ -225,20 +344,20 @@ class VertigohVisionBot(commands.Bot):
 
         embed = discord.Embed(
             title=display_title,
+            url=asset_url,
             description=(
-                f"Asset ready for review on Notion schedule board.\n\n"
-                f"[Asset]({asset_url})\n"
-                f"[Notion]({page_url})"
+                f"Required action: review\n\n"
+                f"[Content Schedule]({page_url})"
             ),
             color=0xF1C40F,
         )
         embed.add_field(name="Reviewer", value=mentions_str, inline=True)
-        embed.add_field(name="Status", value="Review Pending", inline=True)
+        embed.add_field(name="Status", value=format_status("Review Pending"), inline=True)
         embed.set_footer(text="Next remind in 12h")
 
         try:
             msg = await channel.send(
-                content=f"{mentions_str} — {display_title} is ready for review!",
+                content=f"{mentions_str} — {display_title} is ready for review",
                 embed=embed,
                 allowed_mentions=discord.AllowedMentions(roles=True, users=True),
             )
@@ -269,20 +388,20 @@ class VertigohVisionBot(commands.Bot):
 
         embed = discord.Embed(
             title=display_title,
+            url=asset_url,
             description=(
-                f"Asset ready for editing on Notion schedule board.\n\n"
-                f"[Asset]({asset_url})\n"
-                f"[Notion]({page_url})"
+                f"Required action: edit\n\n"
+                f"[Content Schedule]({page_url})"
             ),
             color=0x3498DB,
         )
         embed.add_field(name="Editor", value=mentions_str, inline=True)
-        embed.add_field(name="Status", value="Edit Pending", inline=True)
+        embed.add_field(name="Status", value=format_status("Edit Pending"), inline=True)
         embed.set_footer(text="Next remind in 24h")
 
         try:
             msg = await channel.send(
-                content=f"{mentions_str} — {display_title} is ready for edits!",
+                content=f"{mentions_str} — {display_title} is ready for edits",
                 embed=embed,
                 allowed_mentions=discord.AllowedMentions(roles=True, users=True),
             )
@@ -313,20 +432,20 @@ class VertigohVisionBot(commands.Bot):
 
         embed = discord.Embed(
             title=display_title,
+            url=asset_url,
             description=(
-                f"Asset ready to post on Notion schedule board.\n\n"
-                f"[Asset]({asset_url})\n"
-                f"[Notion]({page_url})"
+                f"Required action: post\n\n"
+                f"[Content Schedule]({page_url})"
             ),
             color=0x9B59B6,
         )
         embed.add_field(name="Poster", value=mentions_str, inline=True)
-        embed.add_field(name="Status", value="Ready to Post", inline=True)
+        embed.add_field(name="Status", value=format_status("Ready to Post"), inline=True)
         embed.set_footer(text="Next remind in 24h")
 
         try:
             msg = await channel.send(
-                content=f"{mentions_str} — {display_title} is ready to post!",
+                content=f"{mentions_str} — {display_title} is ready to post",
                 embed=embed,
                 allowed_mentions=discord.AllowedMentions(roles=True, users=True),
             )
@@ -361,14 +480,14 @@ class VertigohVisionBot(commands.Bot):
 
         if cat_upper == "EDIT":
             content = (
-                f"⏰ **[24h Edit Reminder #{stage + 1}]** {mentions_str} — **{display_title}** is still pending edits!\n"
-                f"[Asset]({asset_url}) • [Notion]({page_url})"
+                f"⏰ **[24h Edit Reminder #{stage + 1}]** {mentions_str} — **{display_title}** is still pending edits\n"
+                f"[Content Schedule]({page_url})"
             )
             next_h = "24h"
         elif cat_upper in ("POST", "READY_TO_POST"):
             content = (
-                f"🚀 **[24h Ready to Post Reminder #{stage + 1}]** {mentions_str} — **{display_title}** is ready to post!\n"
-                f"[Asset]({asset_url}) • [Notion]({page_url})"
+                f"🚀 **[24h Ready to Post Reminder #{stage + 1}]** {mentions_str} — **{display_title}** is ready to post\n"
+                f"[Content Schedule]({page_url})"
             )
             next_h = "24h"
         else:
@@ -387,8 +506,8 @@ class VertigohVisionBot(commands.Bot):
                 next_h = "2h"
 
             content = (
-                f"{header} {mentions_str} — **{display_title}** is still pending review!\n"
-                f"[Asset]({asset_url}) • [Notion]({page_url})"
+                f"{header} {mentions_str} — **{display_title}** is still pending review\n"
+                f"[Content Schedule]({page_url})"
             )
 
         try:
@@ -430,7 +549,8 @@ class VertigohVisionBot(commands.Bot):
                 display_title = clean_title if clean_title.startswith("“") or clean_title.startswith('"') else f"“{clean_title}”"
 
                 new_embed = discord.Embed(
-                    title=f"[Resolved] {display_title}",
+                    title=display_title,
+                    url=old_embed.url,
                     description=old_embed.description,
                     color=0x2ECC71,
                 )
@@ -438,7 +558,7 @@ class VertigohVisionBot(commands.Bot):
                     if field.name.lower() in ("status", "⏳ status", "✅ status"):
                         new_embed.add_field(
                             name="Status",
-                            value=f"Resolved in Notion ({current_status})",
+                            value=format_status(current_status, is_resolved=True),
                             inline=field.inline,
                         )
                     else:
@@ -446,7 +566,6 @@ class VertigohVisionBot(commands.Bot):
                 new_embed.set_footer(text="Resolved via Notion update • Reminders stopped")
                 await orig_msg.edit(embed=new_embed)
         except Exception as e:
-            logger.warning("Could not update resolved message %s: %s", message_id, e)
             logger.warning("Could not update resolved message %s: %s", message_id, e)
 
     # backward compatibility wrappers

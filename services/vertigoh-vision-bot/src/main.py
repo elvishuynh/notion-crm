@@ -44,6 +44,7 @@ async def main():
         db=db,
         reviewer_id=REVIEWER_DISCORD_ID,
         guild_id=DISCORD_GUILD_ID,
+        notion=notion,
     )
 
     scheduler = ReviewScheduler(
@@ -55,6 +56,7 @@ async def main():
         notion_interval=NOTION_POLL_INTERVAL,
         escalation_interval=SCHEDULER_INTERVAL,
     )
+    bot.scheduler = scheduler
 
     scheduler_task = None
 

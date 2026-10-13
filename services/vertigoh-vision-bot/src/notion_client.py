@@ -246,3 +246,27 @@ class NotionClient:
             start_cursor = response.get("next_cursor")
 
         return results
+
+    def update_page_status(self, page_id: str, new_status: str) -> bool:
+        # update notion page status
+        clean_id = page_id.replace("-", "").strip()
+        status_variants = [new_status]
+        if new_status == "Ready to Post":
+            status_variants.append("Ready to post")
+        elif new_status == "Ready to post":
+            status_variants.append("Ready to Post")
+
+        for variant in status_variants:
+            for ptype in ("status", "select"):
+                try:
+                    self._request(
+                        "PATCH",
+                        f"/pages/{clean_id}",
+                        json={"properties": {"Status": {ptype: {"name": variant}}}},
+                    )
+                    return True
+                except Exception:
+                    continue
+
+        logger.error("Failed to update status for page %s to '%s'", page_id, new_status)
+        return False

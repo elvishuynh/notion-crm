@@ -154,6 +154,18 @@ class TestNotionClient(unittest.TestCase):
         self.assertEqual(results[0]["asset_url"], "https://vimeo.com/123456")
         self.assertEqual(results[0]["uploaders"], ["Elvis"])
 
+    @patch.object(NotionClient, "_request")
+    def test_update_page_status(self, mock_request):
+        # test update page status
+        mock_request.return_value = {"object": "page"}
+        res = self.client.update_page_status("row_1", "Ready to Post")
+        self.assertTrue(res)
+        mock_request.assert_called_once_with(
+            "PATCH",
+            "/pages/row_1",
+            json={"properties": {"Status": {"status": {"name": "Ready to Post"}}}},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
