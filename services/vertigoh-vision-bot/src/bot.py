@@ -220,20 +220,25 @@ class VertigohVisionBot(commands.Bot):
 
         guild = channel.guild if hasattr(channel, "guild") else None
         mentions_str = self.resolve_role_mentions(reviewers, guild)
+        clean_title = page_title.strip()
+        display_title = clean_title if clean_title.startswith("“") or clean_title.startswith('"') else f"“{clean_title}”"
+
         embed = discord.Embed(
-            title=f"🎬 Review Pending: {page_title}",
-            description="Asset ready for review on Notion schedule board.",
+            title=display_title,
+            description=(
+                f"Asset ready for review on Notion schedule board.\n\n"
+                f"[Asset]({asset_url})\n"
+                f"[Notion]({page_url})"
+            ),
             color=0xF1C40F,
         )
-        embed.add_field(name="🔗 Asset Link", value=f"[Open Asset Video/Media]({asset_url})", inline=False)
-        embed.add_field(name="📋 Notion Board", value=f"[View Notion Page]({page_url})", inline=False)
-        embed.add_field(name="👤 Assigned Role(s)", value=mentions_str, inline=True)
-        embed.add_field(name="⏳ Status", value="Review Pending", inline=True)
-        embed.set_footer(text="Tracked via Notion • Escalating reminders (+12h, +8h, +4h, +2h)")
+        embed.add_field(name="Reviewer", value=mentions_str, inline=True)
+        embed.add_field(name="Status", value="Review Pending", inline=True)
+        embed.set_footer(text="Next remind in 12h")
 
         try:
             msg = await channel.send(
-                content=f"🔔 {mentions_str} — **{page_title}** is ready for review!",
+                content=f"{mentions_str} — {display_title} is ready for review!",
                 embed=embed,
                 allowed_mentions=discord.AllowedMentions(roles=True, users=True),
             )
@@ -259,20 +264,25 @@ class VertigohVisionBot(commands.Bot):
 
         guild = channel.guild if hasattr(channel, "guild") else None
         mentions_str = self.resolve_role_mentions(editors, guild)
+        clean_title = page_title.strip()
+        display_title = clean_title if clean_title.startswith("“") or clean_title.startswith('"') else f"“{clean_title}”"
+
         embed = discord.Embed(
-            title=f"✂️ Edit Pending: {page_title}",
-            description="Asset ready for editing on Notion schedule board.",
+            title=display_title,
+            description=(
+                f"Asset ready for editing on Notion schedule board.\n\n"
+                f"[Asset]({asset_url})\n"
+                f"[Notion]({page_url})"
+            ),
             color=0x3498DB,
         )
-        embed.add_field(name="🔗 Asset Link", value=f"[Open Asset Video/Media]({asset_url})", inline=False)
-        embed.add_field(name="📋 Notion Board", value=f"[View Notion Page]({page_url})", inline=False)
-        embed.add_field(name="✏️ Assigned Role(s)", value=mentions_str, inline=True)
-        embed.add_field(name="⏳ Status", value="Edit Pending", inline=True)
-        embed.set_footer(text="Tracked via Notion • Daily reminder (every 24h)")
+        embed.add_field(name="Editor", value=mentions_str, inline=True)
+        embed.add_field(name="Status", value="Edit Pending", inline=True)
+        embed.set_footer(text="Next remind in 24h")
 
         try:
             msg = await channel.send(
-                content=f"🔔 {mentions_str} — **{page_title}** is ready for edits!",
+                content=f"{mentions_str} — {display_title} is ready for edits!",
                 embed=embed,
                 allowed_mentions=discord.AllowedMentions(roles=True, users=True),
             )
@@ -298,20 +308,25 @@ class VertigohVisionBot(commands.Bot):
 
         guild = channel.guild if hasattr(channel, "guild") else None
         mentions_str = self.resolve_role_mentions(uploaders, guild)
+        clean_title = page_title.strip()
+        display_title = clean_title if clean_title.startswith("“") or clean_title.startswith('"') else f"“{clean_title}”"
+
         embed = discord.Embed(
-            title=f"🚀 Ready to Post: {page_title}",
-            description="Asset is approved and ready to post on Notion schedule board.",
+            title=display_title,
+            description=(
+                f"Asset ready to post on Notion schedule board.\n\n"
+                f"[Asset]({asset_url})\n"
+                f"[Notion]({page_url})"
+            ),
             color=0x9B59B6,
         )
-        embed.add_field(name="🔗 Asset Link", value=f"[Open Asset Video/Media]({asset_url})", inline=False)
-        embed.add_field(name="📋 Notion Board", value=f"[View Notion Page]({page_url})", inline=False)
-        embed.add_field(name="📤 Assigned Role(s)", value=mentions_str, inline=True)
-        embed.add_field(name="⏳ Status", value="Ready to Post", inline=True)
-        embed.set_footer(text="Tracked via Notion • Daily reminder (every 24h) until Scheduled")
+        embed.add_field(name="Poster", value=mentions_str, inline=True)
+        embed.add_field(name="Status", value="Ready to Post", inline=True)
+        embed.set_footer(text="Next remind in 24h")
 
         try:
             msg = await channel.send(
-                content=f"🔔 {mentions_str} — **{page_title}** is ready to post!",
+                content=f"{mentions_str} — {display_title} is ready to post!",
                 embed=embed,
                 allowed_mentions=discord.AllowedMentions(roles=True, users=True),
             )
@@ -341,40 +356,50 @@ class VertigohVisionBot(commands.Bot):
         guild = channel.guild if hasattr(channel, "guild") else None
         mentions_str = self.resolve_role_mentions(assigned_users, guild)
         cat_upper = category.upper()
+        clean_title = page_title.strip()
+        display_title = clean_title if clean_title.startswith("“") or clean_title.startswith('"') else f"“{clean_title}”"
 
         if cat_upper == "EDIT":
             content = (
-                f"⏰ **[24h Edit Reminder #{stage + 1}]** {mentions_str} — **{page_title}** is still pending edits!\n"
-                f"🔗 **Asset**: {asset_url}\n"
-                f"📋 **Notion**: {page_url}"
+                f"⏰ **[24h Edit Reminder #{stage + 1}]** {mentions_str} — **{display_title}** is still pending edits!\n"
+                f"[Asset]({asset_url}) • [Notion]({page_url})"
             )
+            next_h = "24h"
         elif cat_upper in ("POST", "READY_TO_POST"):
             content = (
-                f"🚀 **[24h Ready to Post Reminder #{stage + 1}]** {mentions_str} — **{page_title}** is ready to post!\n"
-                f"🔗 **Asset**: {asset_url}\n"
-                f"📋 **Notion**: {page_url}"
+                f"🚀 **[24h Ready to Post Reminder #{stage + 1}]** {mentions_str} — **{display_title}** is ready to post!\n"
+                f"[Asset]({asset_url}) • [Notion]({page_url})"
             )
+            next_h = "24h"
         else:
             # review escalation header
             if stage == 0:
                 header = "⚠️ **[12-Hour Review Reminder]**"
+                next_h = "8h"
             elif stage == 1:
                 header = "🚨 **[20-Hour Review Reminder]**"
+                next_h = "4h"
             elif stage == 2:
                 header = "🔥 **[24-Hour Urgent Review Reminder]**"
+                next_h = "2h"
             else:
                 header = f"⏰ **[Review Overdue - Cycle {stage - 2}]**"
+                next_h = "2h"
 
             content = (
-                f"{header} {mentions_str} — **{page_title}** is still pending review!\n"
-                f"🔗 **Asset**: {asset_url}\n"
-                f"📋 **Notion**: {page_url}"
+                f"{header} {mentions_str} — **{display_title}** is still pending review!\n"
+                f"[Asset]({asset_url}) • [Notion]({page_url})"
             )
 
         try:
             try:
                 orig_msg = await channel.fetch_message(message_id)
                 await orig_msg.reply(content=content, allowed_mentions=discord.AllowedMentions(roles=True, users=True))
+                # update original embed footer
+                if orig_msg.embeds:
+                    embed = orig_msg.embeds[0]
+                    embed.set_footer(text=f"Next remind in {next_h}")
+                    await orig_msg.edit(embed=embed)
             except Exception:
                 await channel.send(content=content, allowed_mentions=discord.AllowedMentions(roles=True, users=True))
             return True
@@ -401,33 +426,27 @@ class VertigohVisionBot(commands.Bot):
             orig_msg = await channel.fetch_message(message_id)
             if orig_msg and orig_msg.embeds:
                 old_embed = orig_msg.embeds[0]
-                cat_norm = category.upper()
-                if cat_norm == "REVIEW":
-                    prefix = "🎬"
-                elif cat_norm == "EDIT":
-                    prefix = "✂️"
-                else:
-                    prefix = "🚀"
+                clean_title = page_title.strip()
+                display_title = clean_title if clean_title.startswith("“") or clean_title.startswith('"') else f"“{clean_title}”"
+
                 new_embed = discord.Embed(
-                    title=f"{prefix} [Resolved] {page_title}",
+                    title=f"[Resolved] {display_title}",
                     description=old_embed.description,
                     color=0x2ECC71,
                 )
                 for field in old_embed.fields:
-                    if field.name == "⏳ Status":
+                    if field.name.lower() in ("status", "⏳ status", "✅ status"):
                         new_embed.add_field(
-                            name="✅ Status",
+                            name="Status",
                             value=f"Resolved in Notion ({current_status})",
-                            inline=True,
+                            inline=field.inline,
                         )
                     else:
                         new_embed.add_field(name=field.name, value=field.value, inline=field.inline)
                 new_embed.set_footer(text="Resolved via Notion update • Reminders stopped")
                 await orig_msg.edit(embed=new_embed)
-                await orig_msg.reply(
-                    f"✅ **{page_title}** is resolved (Notion status: **{current_status}**). Reminders stopped."
-                )
         except Exception as e:
+            logger.warning("Could not update resolved message %s: %s", message_id, e)
             logger.warning("Could not update resolved message %s: %s", message_id, e)
 
     # backward compatibility wrappers

@@ -4,6 +4,7 @@ services:
   vertigoh-vision-bot:
     container_name: vertigoh-vision-bot
     image: ghcr.io/elvishuynh/vertigoh-vision-bot:latest
+    pull_policy: always
     build:
       context: .
       dockerfile: Dockerfile

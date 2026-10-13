@@ -92,7 +92,10 @@ class TestVertigohVisionBot(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Teaser Ep 1", call_kwargs["content"])
         self.assertIn(f"<@&{TEAM_ROLE_IDS['elvis']}>", call_kwargs["content"])
         embed = call_kwargs["embed"]
-        self.assertEqual(embed.title, "🚀 Ready to Post: Teaser Ep 1")
+        self.assertEqual(embed.title, "“Teaser Ep 1”")
+        self.assertEqual(embed.fields[0].name, "Poster")
+        self.assertEqual(embed.fields[1].name, "Status")
+        self.assertEqual(embed.footer.text, "Next remind in 24h")
 
     async def test_send_notion_escalation_post(self):
         # test post escalation content
@@ -100,6 +103,8 @@ class TestVertigohVisionBot(unittest.IsolatedAsyncioTestCase):
         mock_msg = MagicMock()
         from unittest.mock import AsyncMock
         mock_msg.reply = AsyncMock()
+        mock_msg.edit = AsyncMock()
+        mock_msg.embeds = [MagicMock()]
         mock_channel.fetch_message = AsyncMock(return_value=mock_msg)
         self.bot.get_channel = MagicMock(return_value=mock_channel)
 
@@ -119,6 +124,46 @@ class TestVertigohVisionBot(unittest.IsolatedAsyncioTestCase):
         reply_content = mock_msg.reply.call_args.kwargs["content"]
         self.assertIn("[24h Ready to Post Reminder #1]", reply_content)
         self.assertIn(f"<@&{TEAM_ROLE_IDS['elvis']}>", reply_content)
+
+    async def test_update_resolved_message_no_reply(self):
+        # test resolved edits without reply
+        mock_channel = MagicMock()
+        mock_msg = MagicMock()
+        from unittest.mock import AsyncMock
+        mock_msg.edit = AsyncMock()
+        mock_msg.reply = AsyncMock()
+
+        old_embed = MagicMock()
+        old_embed.description = "Asset ready for review on Notion schedule board."
+        field_role = MagicMock()
+        field_role.name = "Reviewer"
+        field_role.value = "<@&1559491606653173760>"
+        field_role.inline = True
+        field_status = MagicMock()
+        field_status.name = "Status"
+        field_status.value = "Review Pending"
+        field_status.inline = True
+        old_embed.fields = [field_role, field_status]
+        mock_msg.embeds = [old_embed]
+
+        mock_channel.fetch_message = AsyncMock(return_value=mock_msg)
+        self.bot.get_channel = MagicMock(return_value=mock_channel)
+
+        await self.bot.update_resolved_message(
+            channel_id=12345,
+            message_id=999,
+            page_title="Teaser Ep 1",
+            category="REVIEW",
+            current_status="Edit Pending",
+        )
+
+        # verify edited and no reply sent
+        mock_msg.edit.assert_called_once()
+        mock_msg.reply.assert_not_called()
+        new_embed = mock_msg.edit.call_args.kwargs["embed"]
+        self.assertEqual(new_embed.title, "[Resolved] “Teaser Ep 1”")
+        self.assertEqual(new_embed.footer.text, "Resolved via Notion update • Reminders stopped")
+
 
 
 if __name__ == "__main__":
