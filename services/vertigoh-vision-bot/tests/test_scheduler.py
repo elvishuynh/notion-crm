@@ -4,7 +4,7 @@ import tempfile
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 
-from db import ReviewDatabase, calculate_next_ping, from_iso
+from db import ReviewDatabase, from_iso
 from scheduler import ReviewScheduler
 
 
@@ -15,8 +15,10 @@ class TestReviewScheduler(unittest.IsolatedAsyncioTestCase):
         self.db = ReviewDatabase(self.db_path)
 
         self.mock_bot = MagicMock()
-        self.mock_bot.send_asset_alert = AsyncMock()
-        self.mock_bot.send_escalation_ping = AsyncMock()
+        self.mock_bot.send_review_alert = AsyncMock()
+        self.mock_bot.send_edit_alert = AsyncMock()
+        self.mock_bot.send_notion_escalation = AsyncMock()
+        self.mock_bot.update_resolved_message = AsyncMock()
         self.mock_bot.send_custom_escalation_ping = AsyncMock()
 
         self.mock_notion = MagicMock()
@@ -35,110 +37,223 @@ class TestReviewScheduler(unittest.IsolatedAsyncioTestCase):
     def tearDown(self):
         self.temp_dir.cleanup()
 
-    async def test_poll_notion_new_asset(self):
-        # seed baseline item
-        self.db.seed_baseline_asset("base_page", "Baseline", "https://base.com")
-
+    async def test_poll_notion_review_pending(self):
         self.mock_notion.query_assets_database.return_value = [
             {
                 "notion_page_id": "page_1",
                 "page_title": "Promo Clip A",
                 "asset_url": "https://vimeo.com/9991",
                 "page_url": "https://notion.so/page_1",
+                "status": "Review Pending",
+                "reviewers": ["Roger"],
+                "editors": [],
             }
         ]
         mock_msg = MagicMock()
         mock_msg.id = 555001
-        self.mock_bot.send_asset_alert.return_value = mock_msg
+        self.mock_bot.send_review_alert.return_value = mock_msg
 
         await self.scheduler.poll_notion_once()
 
-        # verify alert dispatched
-        self.mock_bot.send_asset_alert.assert_called_once_with(
+        self.mock_bot.send_review_alert.assert_called_once_with(
             channel_id=987654,
             page_title="Promo Clip A",
             asset_url="https://vimeo.com/9991",
             page_url="https://notion.so/page_1",
-            reviewer_id="reviewer_123",
+            reviewers=["Roger"],
         )
 
-        # verify record saved
-        asset = self.db.get_asset("page_1")
-        self.assertIsNotNone(asset)
-        self.assertEqual(asset["discord_message_id"], 555001)
-        self.assertEqual(asset["status"], "PENDING")
-        self.assertEqual(asset["stage"], 0)
+        item = self.db.get_notion_item("page_1:REVIEW")
+        self.assertIsNotNone(item)
+        self.assertEqual(item["discord_message_id"], 555001)
+        self.assertEqual(item["status"], "PENDING")
+        self.assertEqual(item["category"], "REVIEW")
+        self.assertEqual(item["stage"], 0)
 
-    async def test_poll_notion_empty_db_seeds_baseline(self):
-        # empty db baseline seed
+    async def test_poll_notion_review_pending_unmatched_reviewer_skipped(self):
         self.mock_notion.query_assets_database.return_value = [
             {
-                "notion_page_id": "historical_1",
-                "page_title": "Old Clip",
-                "asset_url": "https://vimeo.com/old",
-                "page_url": "https://notion.so/old",
+                "notion_page_id": "page_unmatched",
+                "page_title": "Clip B",
+                "asset_url": "https://vimeo.com/9992",
+                "page_url": "https://notion.so/page_2",
+                "status": "Review Pending",
+                "reviewers": ["UnknownReviewer"],
+                "editors": [],
             }
         ]
         await self.scheduler.poll_notion_once()
+        self.mock_bot.send_review_alert.assert_not_called()
+        self.assertIsNone(self.db.get_notion_item("page_unmatched:REVIEW"))
 
-        # verify alert skipped
-        self.mock_bot.send_asset_alert.assert_not_called()
+    async def test_poll_notion_edit_pending(self):
+        self.mock_notion.query_assets_database.return_value = [
+            {
+                "notion_page_id": "page_edit_1",
+                "page_title": "Video Edit A",
+                "asset_url": "https://vimeo.com/edit1",
+                "page_url": "https://notion.so/edit_1",
+                "status": "Edit Pending",
+                "reviewers": [],
+                "editors": ["Roger", "Kai"],
+            }
+        ]
+        mock_msg = MagicMock()
+        mock_msg.id = 666001
+        self.mock_bot.send_edit_alert.return_value = mock_msg
 
-        # verify baseline marked
-        asset = self.db.get_asset("historical_1")
-        self.assertIsNotNone(asset)
-        self.assertEqual(asset["status"], "REVIEWED")
-        self.assertEqual(asset["reviewed_by"], "BASELINE_SEED")
+        await self.scheduler.poll_notion_once()
 
-    async def test_poll_notion_already_tracked_skipped(self):
-        # existing asset
-        self.db.record_new_asset(
-            notion_page_id="page_1",
-            page_title="Promo Clip A",
-            asset_url="https://vimeo.com/9991",
+        self.mock_bot.send_edit_alert.assert_called_once_with(
+            channel_id=987654,
+            page_title="Video Edit A",
+            asset_url="https://vimeo.com/edit1",
+            page_url="https://notion.so/edit_1",
+            editors=["Roger", "Kai"],
+        )
+
+        item = self.db.get_notion_item("page_edit_1:EDIT")
+        self.assertIsNotNone(item)
+        self.assertEqual(item["category"], "EDIT")
+        self.assertEqual(item["status"], "PENDING")
+
+    async def test_poll_notion_edit_pending_empty_editor_skipped(self):
+        self.mock_notion.query_assets_database.return_value = [
+            {
+                "notion_page_id": "page_no_editor",
+                "page_title": "Video Edit No Editor",
+                "asset_url": "https://vimeo.com/edit2",
+                "page_url": "https://notion.so/edit_2",
+                "status": "Edit Pending",
+                "reviewers": [],
+                "editors": [],
+            }
+        ]
+        await self.scheduler.poll_notion_once()
+        self.mock_bot.send_edit_alert.assert_not_called()
+        self.assertIsNone(self.db.get_notion_item("page_no_editor:EDIT"))
+
+    async def test_poll_notion_resolves_when_status_changes(self):
+        self.db.record_notion_item(
+            notion_page_id="page_done",
+            category="REVIEW",
+            page_title="Finished Clip",
+            asset_url="https://vimeo.com/done",
+            notion_status="Review Pending",
+            assigned_users="Roger",
             discord_channel_id=987654,
-            discord_message_id=555001,
+            discord_message_id=888001,
         )
+
         self.mock_notion.query_assets_database.return_value = [
             {
-                "notion_page_id": "page_1",
-                "page_title": "Promo Clip A",
-                "asset_url": "https://vimeo.com/9991",
-                "page_url": "https://notion.so/page_1",
+                "notion_page_id": "page_done",
+                "page_title": "Finished Clip",
+                "asset_url": "https://vimeo.com/done",
+                "page_url": "https://notion.so/done",
+                "status": "Ready to post",
+                "reviewers": ["Roger"],
+                "editors": [],
             }
         ]
 
         await self.scheduler.poll_notion_once()
-        self.mock_bot.send_asset_alert.assert_not_called()
 
-    async def test_check_escalations_due(self):
-        # overdue asset
+        item = self.db.get_notion_item("page_done:REVIEW")
+        self.assertEqual(item["status"], "RESOLVED")
+        self.mock_bot.update_resolved_message.assert_called_once_with(
+            channel_id=987654,
+            message_id=888001,
+            page_title="Finished Clip",
+            category="REVIEW",
+            current_status="Ready to post",
+        )
+
+    async def test_check_escalations_due_review(self):
         t_past = datetime.now(timezone.utc) - timedelta(hours=13)
-        self.db.record_new_asset(
-            notion_page_id="page_overdue",
-            page_title="Overdue Clip",
-            asset_url="https://vimeo.com/due",
+        self.db.record_notion_item(
+            notion_page_id="page_overdue_rev",
+            category="REVIEW",
+            page_title="Overdue Review Clip",
+            asset_url="https://vimeo.com/due_rev",
+            notion_status="Review Pending",
+            assigned_users="Roger,Kai",
             discord_channel_id=987654,
             discord_message_id=777001,
+            page_url="https://notion.so/due_rev",
             initial_time=t_past,
         )
 
-        self.mock_bot.send_escalation_ping.return_value = True
+        self.mock_bot.send_notion_escalation.return_value = True
 
         await self.scheduler.check_escalations_once()
 
-        self.mock_bot.send_escalation_ping.assert_called_once_with(
+        self.mock_bot.send_notion_escalation.assert_called_once_with(
             channel_id=987654,
             message_id=777001,
             stage=0,
-            reviewer_id="reviewer_123",
-            page_title="Overdue Clip",
-            asset_url="https://vimeo.com/due",
+            category="REVIEW",
+            page_title="Overdue Review Clip",
+            asset_url="https://vimeo.com/due_rev",
+            page_url="https://notion.so/due_rev",
+            assigned_users=["Roger", "Kai"],
         )
 
-        # verify stage updated
-        updated = self.db.get_asset("page_overdue")
+        updated = self.db.get_notion_item("page_overdue_rev:REVIEW")
         self.assertEqual(updated["stage"], 1)
+
+    async def test_check_escalations_due_edit_24h(self):
+        t_past = datetime.now(timezone.utc) - timedelta(hours=25)
+        self.db.record_notion_item(
+            notion_page_id="page_overdue_edit",
+            category="EDIT",
+            page_title="Overdue Edit Clip",
+            asset_url="https://vimeo.com/due_edit",
+            notion_status="Edit Pending",
+            assigned_users="Elvis",
+            discord_channel_id=987654,
+            discord_message_id=777002,
+            page_url="https://notion.so/due_edit",
+            initial_time=t_past,
+        )
+
+        self.mock_bot.send_notion_escalation.return_value = True
+
+        await self.scheduler.check_escalations_once()
+
+        self.mock_bot.send_notion_escalation.assert_called_once_with(
+            channel_id=987654,
+            message_id=777002,
+            stage=0,
+            category="EDIT",
+            page_title="Overdue Edit Clip",
+            asset_url="https://vimeo.com/due_edit",
+            page_url="https://notion.so/due_edit",
+            assigned_users=["Elvis"],
+        )
+
+        updated = self.db.get_notion_item("page_overdue_edit:EDIT")
+        self.assertEqual(updated["stage"], 1)
+
+    async def test_snooze_skips_escalations(self):
+        t_past = datetime.now(timezone.utc) - timedelta(hours=13)
+        self.db.record_notion_item(
+            notion_page_id="page_snoozed",
+            category="REVIEW",
+            page_title="Snoozed Clip",
+            asset_url="https://vimeo.com/snoozed",
+            notion_status="Review Pending",
+            assigned_users="Roger",
+            discord_channel_id=987654,
+            discord_message_id=777003,
+            initial_time=t_past,
+        )
+
+        # activate snooze
+        self.db.set_snooze(datetime.now(timezone.utc) + timedelta(hours=12))
+
+        await self.scheduler.check_escalations_once()
+        self.mock_bot.send_notion_escalation.assert_not_called()
 
     async def test_check_custom_reminders_due(self):
         t_past = datetime.now(timezone.utc) - timedelta(hours=13)
@@ -165,7 +280,6 @@ class TestReviewScheduler(unittest.IsolatedAsyncioTestCase):
             message_text="Deliver thumbnail concepts",
         )
 
-        # verify reminder stage updated
         updated = self.db.get_custom_reminder("custom_overdue")
         self.assertEqual(updated["stage"], 1)
 

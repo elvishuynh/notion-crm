@@ -1,11 +1,13 @@
 import asyncio
 import logging
-from typing import Optional
-from db import ReviewDatabase
+from typing import Optional, List
+from db import ReviewDatabase, get_current_utc
 from notion_client import NotionClient
-from bot import VertigohVisionBot, HEART_EMOJIS
+from bot import VertigohVisionBot
 
 logger = logging.getLogger(__name__)
+
+REVIEW_TARGETS = {"roger", "kai", "elvis"}
 
 
 class ReviewScheduler:
@@ -15,7 +17,7 @@ class ReviewScheduler:
         notion: NotionClient,
         db: ReviewDatabase,
         channel_id: int,
-        reviewer_id: str,
+        reviewer_id: str = "",
         notion_interval: int = 60,
         escalation_interval: int = 30,
     ):
@@ -29,80 +31,171 @@ class ReviewScheduler:
         self._is_running = False
 
     async def poll_notion_once(self):
-        """Polls Notion for new or updated asset links and posts immediate Discord alerts."""
+        # poll notion updates
         try:
-            logger.debug("Checking Notion for new assets...")
-            assets = self.notion.query_assets_database()
+            logger.debug("Polling Notion schedule database...")
+            items = self.notion.query_assets_database()
+            notion_map = {item["notion_page_id"]: item for item in items}
 
-            # seed baseline on startup
-            if self.db.count_tracked_assets() == 0:
-                logger.info("Empty database detected. Seeding %d existing Notion assets as baseline...", len(assets))
-                for item in assets:
-                    self.db.seed_baseline_asset(
-                        notion_page_id=item["notion_page_id"],
-                        page_title=item["page_title"],
-                        asset_url=item["asset_url"],
-                    )
-                logger.info("Baseline seeding complete. Future newly added/modified assets will trigger alerts.")
-                return
+            # reconcile active items
+            active_items = self.db.get_active_notion_items()
+            for active in active_items:
+                page_id = active["notion_page_id"]
+                category = active["category"]
+                tracking_id = active["tracking_id"]
+                item = notion_map.get(page_id)
 
-            for item in assets:
-                page_id = item["notion_page_id"]
-                current_url = item["asset_url"]
-                title = item["page_title"]
-                page_url = item["page_url"]
+                if not item:
+                    # page removed notion
+                    self.db.mark_notion_item_resolved(tracking_id)
+                    continue
 
-                existing = self.db.get_asset(page_id)
-                # detect new or updated
-                if not existing or existing["asset_url"] != current_url:
-                    logger.info("Found new asset link for '%s': %s", title, current_url)
-                    msg = await self.bot.send_asset_alert(
-                        channel_id=self.channel_id,
-                        page_title=title,
-                        asset_url=current_url,
-                        page_url=page_url,
-                        reviewer_id=self.reviewer_id,
-                    )
-                    if msg:
-                        self.db.record_new_asset(
-                            notion_page_id=page_id,
-                            page_title=title,
-                            asset_url=current_url,
-                            discord_channel_id=self.channel_id,
-                            discord_message_id=msg.id,
+                curr_status = item.get("status", "").strip()
+                curr_asset = item.get("asset_url", "").strip()
+                reviewers = item.get("reviewers", [])
+                editors = item.get("editors", [])
+
+                if category == "REVIEW":
+                    # verify review conditions
+                    is_review_pending = curr_status.lower() == "review pending"
+                    has_asset = bool(curr_asset)
+                    has_reviewer = any(r.lower() in REVIEW_TARGETS for r in reviewers)
+                    if not (is_review_pending and has_asset and has_reviewer):
+                        self.db.mark_notion_item_resolved(tracking_id)
+                        await self.bot.update_resolved_message(
+                            channel_id=active["discord_channel_id"] or self.channel_id,
+                            message_id=active["discord_message_id"],
+                            page_title=active["page_title"],
+                            category="REVIEW",
+                            current_status=curr_status or "Updated",
                         )
-                        logger.info("Alert dispatched and recorded in SQLite for page %s (msg: %s)", page_id, msg.id)
+                        logger.info("Review resolved for '%s' (status: %s)", active["page_title"], curr_status)
+
+                elif category == "EDIT":
+                    # verify edit conditions
+                    is_edit_pending = curr_status.lower() == "edit pending"
+                    has_asset = bool(curr_asset)
+                    has_editor = len(editors) > 0
+                    if not (is_edit_pending and has_asset and has_editor):
+                        self.db.mark_notion_item_resolved(tracking_id)
+                        await self.bot.update_resolved_message(
+                            channel_id=active["discord_channel_id"] or self.channel_id,
+                            message_id=active["discord_message_id"],
+                            page_title=active["page_title"],
+                            category="EDIT",
+                            current_status=curr_status or "Updated",
+                        )
+                        logger.info("Edit resolved for '%s' (status: %s)", active["page_title"], curr_status)
+
+            # check new alerts
+            for item in items:
+                page_id = item["notion_page_id"]
+                title = item["page_title"]
+                asset_url = item["asset_url"].strip()
+                page_url = item["page_url"]
+                status = item["status"].strip()
+                status_lower = status.lower()
+                reviewers = item["reviewers"]
+                editors = item["editors"]
+
+                # check review pending
+                matched_reviewers = [r for r in reviewers if r.lower() in REVIEW_TARGETS]
+                if status_lower == "review pending" and asset_url and matched_reviewers:
+                    tracking_id = f"{page_id}:REVIEW"
+                    existing = self.db.get_notion_item(tracking_id)
+                    if not existing or existing["status"] != "PENDING":
+                        msg = await self.bot.send_review_alert(
+                            channel_id=self.channel_id,
+                            page_title=title,
+                            asset_url=asset_url,
+                            page_url=page_url,
+                            reviewers=matched_reviewers,
+                        )
+                        if msg:
+                            self.db.record_notion_item(
+                                notion_page_id=page_id,
+                                category="REVIEW",
+                                page_title=title,
+                                asset_url=asset_url,
+                                notion_status=status,
+                                assigned_users=",".join(matched_reviewers),
+                                discord_channel_id=self.channel_id,
+                                discord_message_id=msg.id,
+                                page_url=page_url,
+                            )
+                            logger.info("Dispatched review alert for '%s' (msg: %s)", title, msg.id)
+
+                # check edit pending
+                if status_lower == "edit pending" and asset_url and editors:
+                    tracking_id = f"{page_id}:EDIT"
+                    existing = self.db.get_notion_item(tracking_id)
+                    if not existing or existing["status"] != "PENDING":
+                        msg = await self.bot.send_edit_alert(
+                            channel_id=self.channel_id,
+                            page_title=title,
+                            asset_url=asset_url,
+                            page_url=page_url,
+                            editors=editors,
+                        )
+                        if msg:
+                            self.db.record_notion_item(
+                                notion_page_id=page_id,
+                                category="EDIT",
+                                page_title=title,
+                                asset_url=asset_url,
+                                notion_status=status,
+                                assigned_users=",".join(editors),
+                                discord_channel_id=self.channel_id,
+                                discord_message_id=msg.id,
+                                page_url=page_url,
+                            )
+                            logger.info("Dispatched edit alert for '%s' (msg: %s)", title, msg.id)
+
         except Exception as e:
             logger.error("Error during Notion poll tick: %s", e)
 
     async def check_escalations_once(self):
-        """Checks for overdue asset reviews and sends escalating pings."""
+        # check overdue escalations
         try:
-            due_items = self.db.get_due_escalations()
+            snooze_until = self.db.get_snooze_until()
+            if snooze_until and get_current_utc() < snooze_until:
+                logger.debug("Reminders snoozed until %s", snooze_until)
+                return
+
+            due_items = self.db.get_due_notion_items()
             for item in due_items:
-                page_id = item["notion_page_id"]
+                tracking_id = item["tracking_id"]
                 stage = item["stage"]
                 channel_id = item["discord_channel_id"] or self.channel_id
                 message_id = item["discord_message_id"]
+                category = item["category"]
+                assigned = [u.strip() for u in item["assigned_users"].split(",") if u.strip()]
 
-                logger.info("Escalating asset %s (Stage %d overdue)", page_id, stage)
-                success = await self.bot.send_escalation_ping(
+                logger.info("Escalating %s (%s stage %d overdue)", tracking_id, category, stage)
+                success = await self.bot.send_notion_escalation(
                     channel_id=channel_id,
                     message_id=message_id,
                     stage=stage,
-                    reviewer_id=self.reviewer_id,
+                    category=category,
                     page_title=item["page_title"],
                     asset_url=item["asset_url"],
+                    page_url=item["page_url"],
+                    assigned_users=assigned,
                 )
                 if success:
-                    updated = self.db.advance_escalation_stage(page_id)
-                    logger.info("Advanced %s to stage %s (next ping at %s)", page_id, updated["stage"], updated["next_ping_at"])
+                    updated = self.db.advance_notion_item_stage(tracking_id)
+                    logger.info("Advanced %s to stage %s (next: %s)", tracking_id, updated["stage"], updated["next_ping_at"])
+
         except Exception as e:
             logger.error("Error during escalation check tick: %s", e)
 
     async def check_custom_reminders_once(self):
-        """Checks for overdue custom reminders and sends escalating pings."""
+        # check custom reminders
         try:
+            snooze_until = self.db.get_snooze_until()
+            if snooze_until and get_current_utc() < snooze_until:
+                return
+
             due_items = self.db.get_due_custom_reminders()
             for item in due_items:
                 rem_id = item["reminder_id"]
@@ -110,7 +203,6 @@ class ReviewScheduler:
                 channel_id = item["discord_channel_id"]
                 message_id = item["discord_message_id"]
 
-                logger.info("Escalating custom reminder %s (Stage %d overdue)", rem_id, stage)
                 success = await self.bot.send_custom_escalation_ping(
                     channel_id=channel_id,
                     message_id=message_id,
@@ -119,78 +211,13 @@ class ReviewScheduler:
                     message_text=item["message_text"],
                 )
                 if success:
-                    updated = self.db.advance_custom_reminder_stage(rem_id)
-                    logger.info("Advanced custom reminder %s to stage %s (next ping at %s)", rem_id, updated["stage"], updated["next_ping_at"])
+                    self.db.advance_custom_reminder_stage(rem_id)
+
         except Exception as e:
-            logger.error("Error during custom reminder escalation check: %s", e)
-
-    async def reconcile_pending_reactions_once(self):
-        """Reconciles Discord reactions for pending items in case reaction occurred while offline."""
-        try:
-            # catch offline reactions
-            due_or_pending = self.db.get_due_escalations()
-            for item in due_or_pending:
-                msg_id = item["discord_message_id"]
-                ch_id = item["discord_channel_id"] or self.channel_id
-                if not msg_id or not ch_id:
-                    continue
-
-                channel = self.bot.get_channel(ch_id) or await self.bot.fetch_channel(ch_id)
-                if not channel:
-                    continue
-
-                try:
-                    msg = await channel.fetch_message(msg_id)
-                    for reaction in msg.reactions:
-                        if reaction.emoji in HEART_EMOJIS:
-                            async for user in reaction.users():
-                                if self.bot.user and user.id != self.bot.user.id:
-                                    logger.info("Reconciliation caught offline heart reaction by %s for asset msg %s", user.id, msg_id)
-                                    self.db.mark_reviewed_by_message_id(msg_id, reviewer_id=str(user.id))
-                                    await self.bot.update_reviewed_message(
-                                        channel_id=ch_id,
-                                        message_id=msg_id,
-                                        reviewer_user=user,
-                                        page_title=item["page_title"],
-                                    )
-                                    break
-                except Exception:
-                    pass
-
-            # reconcile custom reminders
-            due_custom = self.db.get_due_custom_reminders()
-            for item in due_custom:
-                msg_id = item["discord_message_id"]
-                ch_id = item["discord_channel_id"]
-                if not msg_id or not ch_id:
-                    continue
-
-                channel = self.bot.get_channel(ch_id) or await self.bot.fetch_channel(ch_id)
-                if not channel:
-                    continue
-
-                try:
-                    msg = await channel.fetch_message(msg_id)
-                    for reaction in msg.reactions:
-                        if reaction.emoji in HEART_EMOJIS:
-                            async for user in reaction.users():
-                                if self.bot.user and user.id != self.bot.user.id:
-                                    logger.info("Reconciliation caught offline heart reaction by %s for custom reminder msg %s", user.id, msg_id)
-                                    self.db.mark_custom_reminder_acknowledged(msg_id, acknowledged_by=str(user.id))
-                                    await self.bot.update_acknowledged_reminder_message(
-                                        channel_id=ch_id,
-                                        message_id=msg_id,
-                                        acknowledged_by_user=user,
-                                        message_text=item["message_text"],
-                                    )
-                                    break
-                except Exception:
-                    pass
-        except Exception as e:
-            logger.debug("Reconciliation check failed: %s", e)
+            logger.error("Error during custom reminder check: %s", e)
 
     async def start(self):
-        """Starts the periodic background loops."""
+        # start background loops
         self._is_running = True
         logger.info("ReviewScheduler started (Notion poll: %ds, Escalation: %ds)", self.notion_interval, self.escalation_interval)
 
@@ -201,7 +228,6 @@ class ReviewScheduler:
 
         async def escalation_loop():
             while self._is_running:
-                await self.reconcile_pending_reactions_once()
                 await self.check_escalations_once()
                 await self.check_custom_reminders_once()
                 await asyncio.sleep(self.escalation_interval)
@@ -209,5 +235,6 @@ class ReviewScheduler:
         await asyncio.gather(notion_loop(), escalation_loop())
 
     def stop(self):
+        # stop background loops
         self._is_running = False
         logger.info("ReviewScheduler stopped.")

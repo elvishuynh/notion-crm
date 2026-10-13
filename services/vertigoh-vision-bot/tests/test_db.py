@@ -184,6 +184,50 @@ class TestReviewDatabase(unittest.TestCase):
         # verify removed from queue
         self.assertEqual(len(self.db.get_due_custom_reminders(t0 + timedelta(days=5))), 0)
 
+    def test_calculate_edit_next_ping(self):
+        from db import calculate_edit_next_ping
+        base = datetime(2026, 10, 12, 12, 0, 0, tzinfo=timezone.utc)
+        self.assertEqual(calculate_edit_next_ping(0, base), base + timedelta(hours=24))
+        self.assertEqual(calculate_edit_next_ping(1, base), base + timedelta(hours=24))
+
+    def test_snooze(self):
+        self.assertIsNone(self.db.get_snooze_until())
+        until = datetime.now(timezone.utc) + timedelta(hours=12)
+        self.db.set_snooze(until)
+        active = self.db.get_snooze_until()
+        self.assertIsNotNone(active)
+
+        self.db.clear_snooze()
+        self.assertIsNone(self.db.get_snooze_until())
+
+    def test_notion_item_lifecycle(self):
+        t0 = datetime(2026, 10, 12, 0, 0, 0, tzinfo=timezone.utc)
+        item = self.db.record_notion_item(
+            notion_page_id="page_p1",
+            category="REVIEW",
+            page_title="Review Clip",
+            asset_url="https://vimeo.com/p1",
+            notion_status="Review Pending",
+            assigned_users="Roger,Kai",
+            discord_channel_id=111,
+            discord_message_id=222,
+            initial_time=t0,
+        )
+        self.assertEqual(item["tracking_id"], "page_p1:REVIEW")
+        self.assertEqual(item["category"], "REVIEW")
+        self.assertEqual(item["stage"], 0)
+        self.assertEqual(from_iso(item["next_ping_at"]), t0 + timedelta(hours=12))
+
+        # advance
+        adv = self.db.advance_notion_item_stage("page_p1:REVIEW", ping_time=t0 + timedelta(hours=12))
+        self.assertEqual(adv["stage"], 1)
+        self.assertEqual(from_iso(adv["next_ping_at"]), t0 + timedelta(hours=20))
+
+        # resolve
+        res = self.db.mark_notion_item_resolved("page_p1:REVIEW")
+        self.assertEqual(res["status"], "RESOLVED")
+        self.assertEqual(len(self.db.get_active_notion_items("REVIEW")), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

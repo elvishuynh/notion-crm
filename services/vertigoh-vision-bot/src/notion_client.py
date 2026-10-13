@@ -170,8 +170,38 @@ class NotionClient:
                     return full_title
         return "Untitled Content"
 
+    def extract_status(self, page_properties: Dict[str, Any]) -> str:
+        # extract status property
+        for key, prop in page_properties.items():
+            if key.strip().lower() == "status":
+                ptype = prop.get("type")
+                if ptype == "select":
+                    sel = prop.get("select")
+                    return sel.get("name", "").strip() if sel else ""
+                elif ptype == "status":
+                    st = prop.get("status")
+                    return st.get("name", "").strip() if st else ""
+        return ""
+
+    def extract_names_list(self, page_properties: Dict[str, Any], prop_name: str) -> List[str]:
+        # extract reviewers or editors
+        target = prop_name.strip().lower()
+        for key, prop in page_properties.items():
+            if key.strip().lower() == target:
+                ptype = prop.get("type")
+                if ptype == "multi_select":
+                    return [o.get("name", "").strip() for o in prop.get("multi_select", []) if o.get("name")]
+                elif ptype == "select":
+                    sel = prop.get("select")
+                    return [sel["name"].strip()] if sel and sel.get("name") else []
+                elif ptype == "people":
+                    return [p.get("name", "").strip() for p in prop.get("people", []) if p.get("name")]
+                elif ptype == "rich_text":
+                    raw = "".join(t.get("plain_text", "") for t in prop.get("rich_text", [])).strip()
+                    return [n.strip() for n in raw.split(",") if n.strip()] if raw else []
+        return []
+
     def query_assets_database(self) -> List[Dict[str, Any]]:
-        """Queries the database for all records and extracts records that have an Asset link."""
         target_db = self.resolve_target_database_id()
         endpoint = f"/databases/{target_db}/query"
 
@@ -193,12 +223,19 @@ class NotionClient:
                 if asset_link:
                     title = self.extract_page_title(props)
                     page_url = page.get("url", f"https://www.notion.so/{page_id.replace('-', '')}")
+                    status = self.extract_status(props)
+                    reviewers = self.extract_names_list(props, "reviewer")
+                    editors = self.extract_names_list(props, "editor")
+
                     results.append(
                         {
                             "notion_page_id": page_id,
                             "page_title": title,
                             "asset_url": asset_link,
                             "page_url": page_url,
+                            "status": status,
+                            "reviewers": reviewers,
+                            "editors": editors,
                         }
                     )
 

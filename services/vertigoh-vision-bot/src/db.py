@@ -16,14 +16,8 @@ def from_iso(s: str) -> datetime:
     return datetime.fromisoformat(s)
 
 
-def calculate_next_ping(stage: int, base_time: Optional[datetime] = None) -> datetime:
-    """
-    Calculates the next ping deadline based on the escalation schedule:
-      - Stage 0 (Initial sent) -> +12 hours
-      - Stage 1 (12h ping sent) -> +8 hours
-      - Stage 2 (8h ping sent) -> +4 hours
-      - Stage 3+ (4h ping sent & subsequent) -> +2 hours recurring
-    """
+def calculate_review_next_ping(stage: int, base_time: Optional[datetime] = None) -> datetime:
+    # calculate review ping deadline
     base = base_time or get_current_utc()
     if stage == 0:
         return base + timedelta(hours=12)
@@ -33,6 +27,15 @@ def calculate_next_ping(stage: int, base_time: Optional[datetime] = None) -> dat
         return base + timedelta(hours=4)
     else:
         return base + timedelta(hours=2)
+
+
+def calculate_edit_next_ping(stage: int, base_time: Optional[datetime] = None) -> datetime:
+    # calculate 24h edit deadline
+    base = base_time or get_current_utc()
+    return base + timedelta(hours=24)
+
+
+calculate_next_ping = calculate_review_next_ping
 
 
 from contextlib import contextmanager
@@ -136,6 +139,49 @@ class ReviewDatabase:
                 """
                 CREATE INDEX IF NOT EXISTS idx_reminders_msg_id 
                 ON custom_reminders (discord_message_id);
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS tracked_notion_items (
+                    tracking_id TEXT PRIMARY KEY,
+                    notion_page_id TEXT NOT NULL,
+                    category TEXT NOT NULL,
+                    page_title TEXT NOT NULL,
+                    asset_url TEXT NOT NULL,
+                    page_url TEXT NOT NULL DEFAULT '',
+                    notion_status TEXT NOT NULL,
+                    assigned_users TEXT NOT NULL,
+                    discord_channel_id INTEGER,
+                    discord_message_id INTEGER,
+                    status TEXT NOT NULL DEFAULT 'PENDING',
+                    stage INTEGER NOT NULL DEFAULT 0,
+                    initial_sent_at TEXT NOT NULL,
+                    last_pinged_at TEXT NOT NULL,
+                    next_ping_at TEXT NOT NULL,
+                    resolved_at TEXT
+                );
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_items_status_next_ping 
+                ON tracked_notion_items (status, next_ping_at);
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_items_page_cat 
+                ON tracked_notion_items (notion_page_id, category);
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS bot_settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
                 """
             )
 
@@ -495,3 +541,220 @@ class ReviewDatabase:
                 (acknowledged_by, to_iso(now), rem["reminder_id"]),
             )
         return self.get_custom_reminder(rem["reminder_id"])
+
+    # snooze settings
+
+    def set_snooze(self, until_dt: datetime):
+        # set snooze until timestamp
+        now_str = to_iso(get_current_utc())
+        until_str = to_iso(until_dt)
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO bot_settings (key, value, updated_at)
+                VALUES ('snooze_until', ?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at;
+                """,
+                (until_str, now_str),
+            )
+            conn.execute(
+                """
+                UPDATE tracked_notion_items
+                SET next_ping_at = ?
+                WHERE status = 'PENDING' AND next_ping_at < ?;
+                """,
+                (until_str, until_str),
+            )
+
+    def get_snooze_until(self) -> Optional[datetime]:
+        # get active snooze timestamp
+        with self._get_connection() as conn:
+            row = conn.execute("SELECT value FROM bot_settings WHERE key = 'snooze_until'").fetchone()
+            if not row or not row["value"]:
+                return None
+            try:
+                dt = from_iso(row["value"])
+                return dt if dt > get_current_utc() else None
+            except Exception:
+                return None
+
+    def clear_snooze(self):
+        # clear active snooze
+        now_str = to_iso(get_current_utc())
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO bot_settings (key, value, updated_at)
+                VALUES ('snooze_until', '', ?)
+                ON CONFLICT(key) DO UPDATE SET value = '', updated_at = excluded.updated_at;
+                """,
+                (now_str,),
+            )
+
+    # notion items tracking
+
+    def record_notion_item(
+        self,
+        notion_page_id: str,
+        category: str,
+        page_title: str,
+        asset_url: str,
+        notion_status: str,
+        assigned_users: str,
+        discord_channel_id: int,
+        discord_message_id: int,
+        page_url: str = "",
+        initial_time: Optional[datetime] = None,
+    ) -> Dict[str, Any]:
+        # record pending review or edit item
+        tracking_id = f"{notion_page_id}:{category.upper()}"
+        now = initial_time or get_current_utc()
+        now_str = to_iso(now)
+        cat_upper = category.upper()
+        if cat_upper == "EDIT":
+            next_ping = calculate_edit_next_ping(stage=0, base_time=now)
+        else:
+            next_ping = calculate_review_next_ping(stage=0, base_time=now)
+        next_ping_str = to_iso(next_ping)
+
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO tracked_notion_items (
+                    tracking_id, notion_page_id, category, page_title, asset_url,
+                    page_url, notion_status, assigned_users, discord_channel_id,
+                    discord_message_id, status, stage, initial_sent_at,
+                    last_pinged_at, next_ping_at, resolved_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', 0, ?, ?, ?, NULL)
+                ON CONFLICT(tracking_id) DO UPDATE SET
+                    page_title = excluded.page_title,
+                    asset_url = excluded.asset_url,
+                    page_url = excluded.page_url,
+                    notion_status = excluded.notion_status,
+                    assigned_users = excluded.assigned_users,
+                    discord_channel_id = excluded.discord_channel_id,
+                    discord_message_id = excluded.discord_message_id,
+                    status = 'PENDING',
+                    stage = 0,
+                    initial_sent_at = excluded.initial_sent_at,
+                    last_pinged_at = excluded.last_pinged_at,
+                    next_ping_at = excluded.next_ping_at,
+                    resolved_at = NULL;
+                """,
+                (
+                    tracking_id,
+                    notion_page_id,
+                    cat_upper,
+                    page_title,
+                    asset_url,
+                    page_url,
+                    notion_status,
+                    assigned_users,
+                    discord_channel_id,
+                    discord_message_id,
+                    now_str,
+                    now_str,
+                    next_ping_str,
+                ),
+            )
+        return self.get_notion_item(tracking_id)
+
+    def get_notion_item(self, tracking_id: str) -> Optional[Dict[str, Any]]:
+        # get item by tracking id
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM tracked_notion_items WHERE tracking_id = ?",
+                (tracking_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def get_active_notion_items(self, category: Optional[str] = None) -> List[Dict[str, Any]]:
+        # get active pending items
+        with self._get_connection() as conn:
+            if category:
+                rows = conn.execute(
+                    "SELECT * FROM tracked_notion_items WHERE status = 'PENDING' AND category = ? ORDER BY initial_sent_at ASC",
+                    (category.upper(),),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM tracked_notion_items WHERE status = 'PENDING' ORDER BY initial_sent_at ASC"
+                ).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_due_notion_items(self, current_time: Optional[datetime] = None) -> List[Dict[str, Any]]:
+        # get items due for escalation
+        now = current_time or get_current_utc()
+        now_str = to_iso(now)
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM tracked_notion_items
+                WHERE status = 'PENDING' AND next_ping_at <= ?
+                ORDER BY next_ping_at ASC;
+                """,
+                (now_str,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def advance_notion_item_stage(
+        self,
+        tracking_id: str,
+        ping_time: Optional[datetime] = None,
+    ) -> Optional[Dict[str, Any]]:
+        # increment escalation stage
+        item = self.get_notion_item(tracking_id)
+        if not item or item["status"] != "PENDING":
+            return None
+
+        now = ping_time or get_current_utc()
+        next_stage = item["stage"] + 1
+        if item["category"] == "EDIT":
+            next_ping = calculate_edit_next_ping(stage=next_stage, base_time=now)
+        else:
+            next_ping = calculate_review_next_ping(stage=next_stage, base_time=now)
+
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                UPDATE tracked_notion_items
+                SET stage = ?,
+                    last_pinged_at = ?,
+                    next_ping_at = ?
+                WHERE tracking_id = ?;
+                """,
+                (next_stage, to_iso(now), to_iso(next_ping), tracking_id),
+            )
+        return self.get_notion_item(tracking_id)
+
+    def mark_notion_item_resolved(
+        self,
+        tracking_id: str,
+        resolved_at: Optional[datetime] = None,
+    ) -> Optional[Dict[str, Any]]:
+        # mark item resolved in notion
+        item = self.get_notion_item(tracking_id)
+        if not item:
+            return None
+
+        now = resolved_at or get_current_utc()
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                UPDATE tracked_notion_items
+                SET status = 'RESOLVED',
+                    resolved_at = ?
+                WHERE tracking_id = ?;
+                """,
+                (to_iso(now), tracking_id),
+            )
+        return self.get_notion_item(tracking_id)
+
+    def get_notion_item_by_message_id(self, discord_message_id: int) -> Optional[Dict[str, Any]]:
+        # find item by message id
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM tracked_notion_items WHERE discord_message_id = ?",
+                (discord_message_id,),
+            ).fetchone()
+            return dict(row) if row else None
