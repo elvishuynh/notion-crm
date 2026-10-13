@@ -1,0 +1,44 @@
+name: Deploy to Google Apps Script
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'services/gmail-ingestion/**'
+      - '.github/workflows/deploy.yml'
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: Push to Apps Script
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install clasp
+        run: sudo npm install -g @google/clasp
+
+      - name: Configure clasp authentication
+        env:
+          CLASPRC_CONTENT: ${{ secrets.CLASPRC_JSON }}
+        run: |
+          if [ -z "$CLASPRC_CONTENT" ]; then
+            echo "::error::CLASPRC_JSON secret is empty or missing in GitHub Secrets!"
+            exit 1
+          fi
+          echo "$CLASPRC_CONTENT" > ~/.clasprc.json
+          echo "$CLASPRC_CONTENT" > ./services/gmail-ingestion/.clasprc.json
+          chmod 600 ~/.clasprc.json ./services/gmail-ingestion/.clasprc.json
+          node -e 'JSON.parse(require("fs").readFileSync(require("os").homedir() + "/.clasprc.json", "utf8"))'
+          echo "Clasp authentication file successfully validated."
+
+      - name: Deploy to Google Apps Script
+        working-directory: services/gmail-ingestion
+        run: clasp push --force

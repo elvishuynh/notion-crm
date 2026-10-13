@@ -1,0 +1,23 @@
+.antigravity/
+PROJECT_GUIDELINES.md
+.clasprc.json
+node_modules/
+.DS_Store
+
+# Python & Virtual Environments
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local Service Data & Databases
+data/
+*.db
+*.sqlite
+*.sqlite3
+
+# Environment Secrets
+.env
+.env.local
+

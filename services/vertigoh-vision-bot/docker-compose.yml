@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  vertigoh-vision-bot:
+    container_name: vertigoh-vision-bot
+    image: ghcr.io/elvishuynh/vertigoh-vision-bot:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
