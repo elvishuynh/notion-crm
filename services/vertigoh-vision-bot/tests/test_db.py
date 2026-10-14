@@ -278,6 +278,76 @@ class TestReviewDatabase(unittest.TestCase):
         self.assertEqual(res["status"], "RESOLVED")
         self.assertEqual(len(self.db.get_active_notion_items("POST")), 0)
 
+    def test_custom_reminder_pings_and_lookup(self):
+        # test ping tracking
+        t0 = datetime(2026, 10, 12, 0, 0, 0, tzinfo=timezone.utc)
+        self.db.record_custom_reminder(
+            reminder_id="rem_ping_test",
+            message_text="Sleep on time",
+            discord_guild_id=123,
+            discord_channel_id=456,
+            discord_message_id=789,
+            target_user_id="user_elvis",
+            created_by_user_id="user_roger",
+            initial_time=t0,
+        )
+
+        self.db.record_custom_reminder_ping(
+            ping_message_id=999111,
+            reminder_id="rem_ping_test",
+            discord_message_id=789,
+            ping_time=t0 + timedelta(hours=12),
+        )
+
+        # verify ping lookup
+        pings = self.db.get_custom_reminder_pings("rem_ping_test")
+        self.assertEqual(len(pings), 1)
+        self.assertEqual(pings[0]["ping_message_id"], 999111)
+
+        # lookup by original
+        found_orig = self.db.get_custom_reminder_by_any_message_id(789)
+        self.assertIsNotNone(found_orig)
+        self.assertEqual(found_orig["reminder_id"], "rem_ping_test")
+
+        # lookup by ping
+        found_ping = self.db.get_custom_reminder_by_any_message_id(999111)
+        self.assertIsNotNone(found_ping)
+        self.assertEqual(found_ping["reminder_id"], "rem_ping_test")
+
+        # ack via ping id
+        acked = self.db.mark_custom_reminder_acknowledged(999111, acknowledged_by="user_elvis")
+        self.assertIsNotNone(acked)
+        self.assertEqual(acked["status"], "REVIEWED")
+        self.assertEqual(acked["acknowledged_by"], "user_elvis")
+
+    def test_get_all_pending_custom_reminders(self):
+        # test pending reminder listing
+        self.db.record_custom_reminder(
+            reminder_id="rem_a",
+            message_text="Task A",
+            discord_guild_id=1,
+            discord_channel_id=2,
+            discord_message_id=3,
+            target_user_id="u1",
+            created_by_user_id="u2",
+        )
+        self.db.record_custom_reminder(
+            reminder_id="rem_b",
+            message_text="Task B",
+            discord_guild_id=1,
+            discord_channel_id=2,
+            discord_message_id=4,
+            target_user_id="u1",
+            created_by_user_id="u2",
+        )
+        pending = self.db.get_all_pending_custom_reminders()
+        self.assertEqual(len(pending), 2)
+
+        self.db.mark_custom_reminder_acknowledged(3, acknowledged_by="u1")
+        pending_after = self.db.get_all_pending_custom_reminders()
+        self.assertEqual(len(pending_after), 1)
+        self.assertEqual(pending_after[0]["reminder_id"], "rem_b")
+
 
 if __name__ == "__main__":
     unittest.main()

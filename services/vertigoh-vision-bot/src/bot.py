@@ -62,7 +62,31 @@ def format_status(status_str: str, is_resolved: bool = False) -> str:
         return f"⏳ {clean}"
 
 
-HEART_EMOJIS = set()
+HEART_EMOJIS = {
+    "❤️", "❤", "\u2764\ufe0f", "\u2764",
+    "♥️", "♥", "\u2665\ufe0f", "\u2665",
+    "💖", "💗", "💓", "💕", "💞", "💘",
+    "💙", "💚", "💛", "💜", "🖤", "🤍", "🤎", "🧡", "🩵", "🩶", "🩷",
+}
+
+HEART_EMOJI_NAMES = {
+    "heart", "hearts", "sparkling_heart", "heartpulse", "heartbeat",
+    "two_hearts", "revolving_hearts", "cupid", "gift_heart",
+    "blue_heart", "green_heart", "yellow_heart", "purple_heart",
+    "black_heart", "white_heart", "brown_heart", "orange_heart",
+    "pink_heart", "grey_heart", "light_blue_heart",
+}
+
+
+def is_heart_emoji(emoji_val: str) -> bool:
+    # check heart emoji
+    clean = emoji_val.strip()
+    if clean in HEART_EMOJIS:
+        return True
+    name = clean.strip(":").lower()
+    if name in HEART_EMOJI_NAMES or "heart" in name:
+        return True
+    return False
 
 
 class VertigohVisionBot(commands.Bot):
@@ -269,12 +293,70 @@ class VertigohVisionBot(commands.Bot):
             await self.scheduler.poll_notion_once()
         return success
 
+    async def _find_custom_reminder_from_message(
+        self, channel_id: int, message_id: int
+    ) -> Optional[Dict[str, Any]]:
+        # find reminder from message
+        try:
+            channel = await self._get_destination_channel(channel_id)
+            if not channel:
+                return None
+            msg = await channel.fetch_message(message_id)
+            if not msg:
+                return None
+
+            if msg.reference and msg.reference.message_id:
+                rem = self.db.get_custom_reminder_by_any_message_id(msg.reference.message_id)
+                if rem:
+                    return rem
+
+            if "Reminder Ping" in msg.content:
+                pending = self.db.get_all_pending_custom_reminders()
+                for r in pending:
+                    if r["discord_channel_id"] == channel_id and r["message_text"] in msg.content:
+                        return r
+        except Exception as e:
+            logger.debug("Failed reminder resolution: %s", e)
+        return None
+
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
         # handle reaction to alert message
         if self.user and payload.user_id == self.user.id:
             return
 
         emoji_str = str(payload.emoji.name) if payload.emoji.name else str(payload.emoji)
+
+        # check heart reaction
+        if is_heart_emoji(emoji_str):
+            custom_rem = self.db.get_custom_reminder_by_any_message_id(payload.message_id)
+            if not custom_rem:
+                custom_rem = await self._find_custom_reminder_from_message(
+                    channel_id=payload.channel_id,
+                    message_id=payload.message_id,
+                )
+
+            if custom_rem and custom_rem["status"] == "PENDING":
+                logger.info(
+                    "Heart reaction '%s' by %s on message %d: stopping reminder %s",
+                    emoji_str,
+                    payload.user_id,
+                    payload.message_id,
+                    custom_rem["reminder_id"],
+                )
+                self.db.mark_custom_reminder_acknowledged(
+                    discord_message_id=custom_rem["discord_message_id"],
+                    acknowledged_by=str(payload.user_id),
+                )
+                user = self.get_user(payload.user_id) or await self.fetch_user(payload.user_id)
+                await self.update_acknowledged_reminder_message(
+                    channel_id=custom_rem["discord_channel_id"],
+                    message_id=custom_rem["discord_message_id"],
+                    acknowledged_by_user=user,
+                    message_text=custom_rem["message_text"],
+                    reacted_message_id=payload.message_id,
+                )
+                return
+
         target_status = self.resolve_status_from_emoji(emoji_str)
         if not target_status:
             return
@@ -299,6 +381,35 @@ class VertigohVisionBot(commands.Bot):
 
         if message.reference and message.reference.message_id:
             cleaned = message.content.strip()
+
+            # check heart reply
+            if is_heart_emoji(cleaned) or cleaned.lower() in ("done", "stop", "acknowledged"):
+                custom_rem = self.db.get_custom_reminder_by_any_message_id(message.reference.message_id)
+                if not custom_rem:
+                    custom_rem = await self._find_custom_reminder_from_message(
+                        channel_id=message.channel.id,
+                        message_id=message.reference.message_id,
+                    )
+                if custom_rem and custom_rem["status"] == "PENDING":
+                    logger.info(
+                        "Reply '%s' on message %d: stopping reminder %s",
+                        cleaned,
+                        message.reference.message_id,
+                        custom_rem["reminder_id"],
+                    )
+                    self.db.mark_custom_reminder_acknowledged(
+                        discord_message_id=custom_rem["discord_message_id"],
+                        acknowledged_by=str(message.author.id),
+                    )
+                    await self.update_acknowledged_reminder_message(
+                        channel_id=custom_rem["discord_channel_id"],
+                        message_id=custom_rem["discord_message_id"],
+                        acknowledged_by_user=message.author,
+                        message_text=custom_rem["message_text"],
+                        reacted_message_id=message.reference.message_id,
+                    )
+                    return
+
             target_status = self.resolve_status_from_emoji(cleaned)
             if target_status:
                 item = self.db.get_notion_item_by_message_id(message.reference.message_id)
@@ -642,12 +753,19 @@ class VertigohVisionBot(commands.Bot):
         embed.add_field(name="👤 Assigned To", value=target_user.mention, inline=True)
         embed.add_field(name="✍️ Set By", value=author_user.mention, inline=True)
         embed.add_field(name="⏳ Status", value="Pending", inline=True)
+        embed.set_footer(text="React with ❤️ to stop reminder pings")
 
         try:
             msg = await channel.send(
                 content=f"🔔 {target_user.mention} — You have a reminder from {author_user.mention}!",
                 embed=embed,
             )
+            # pre-add heart reaction
+            try:
+                await msg.add_reaction("❤️")
+            except Exception as e:
+                logger.warning("Could not add reaction: %s", e)
+
             reminder_id = f"remind_{msg.id}"
             guild_id = channel.guild.id if hasattr(channel, "guild") and channel.guild else None
             self.db.record_custom_reminder(
@@ -681,11 +799,28 @@ class VertigohVisionBot(commands.Bot):
         content = f"⏰ **[Reminder Ping]** {mention_str} — Task: *{message_text}*"
 
         try:
+            ping_msg = None
             try:
                 orig_msg = await channel.fetch_message(message_id)
-                await orig_msg.reply(content=content)
+                ping_msg = await orig_msg.reply(content=content)
             except Exception:
-                await channel.send(content=content)
+                ping_msg = await channel.send(content=content)
+
+            if ping_msg:
+                # pre-add heart reaction
+                try:
+                    await ping_msg.add_reaction("❤️")
+                except Exception as e:
+                    logger.warning("Could not add reaction: %s", e)
+
+                # record ping id
+                rem = self.db.get_custom_reminder_by_message_id(message_id)
+                rem_id = rem["reminder_id"] if rem else f"remind_{message_id}"
+                self.db.record_custom_reminder_ping(
+                    ping_message_id=ping_msg.id,
+                    reminder_id=rem_id,
+                    discord_message_id=message_id,
+                )
             return True
         except Exception as e:
             logger.error("Failed to send reminder escalation ping: %s", e)
@@ -697,6 +832,7 @@ class VertigohVisionBot(commands.Bot):
         message_id: int,
         acknowledged_by_user: discord.User | discord.Member,
         message_text: str,
+        reacted_message_id: Optional[int] = None,
     ):
         # update custom reminder
         try:
@@ -720,6 +856,23 @@ class VertigohVisionBot(commands.Bot):
                         )
                     else:
                         new_embed.add_field(name=field.name, value=field.value, inline=field.inline)
+                new_embed.set_footer(text="Task completed • Reminders stopped")
                 await orig_msg.edit(embed=new_embed)
+
+            # reply confirmation
+            target_msg = None
+            if reacted_message_id and reacted_message_id != message_id:
+                try:
+                    target_msg = await channel.fetch_message(reacted_message_id)
+                except Exception:
+                    pass
+            target_msg = target_msg or orig_msg
+            if target_msg:
+                try:
+                    await target_msg.reply(
+                        f"✅ Task stopped by {acknowledged_by_user.mention}! Reminder pings cleared."
+                    )
+                except Exception:
+                    pass
         except Exception as e:
             logger.warning("Could not update acknowledged reminder message: %s", e)

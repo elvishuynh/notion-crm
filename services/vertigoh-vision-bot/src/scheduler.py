@@ -3,7 +3,7 @@ import logging
 from typing import Optional, List
 from db import ReviewDatabase, get_current_utc
 from notion_client import NotionClient
-from bot import VertigohVisionBot
+from bot import VertigohVisionBot, is_heart_emoji
 
 logger = logging.getLogger(__name__)
 
@@ -271,6 +271,51 @@ class ReviewScheduler:
         except Exception as e:
             logger.error("Error during custom reminder check: %s", e)
 
+    async def reconcile_custom_reminders_once(self):
+        # catch offline reactions
+        try:
+            pending_items = self.db.get_all_pending_custom_reminders()
+            for item in pending_items:
+                ch_id = item["discord_channel_id"]
+                msg_id = item["discord_message_id"]
+                channel = self.bot.get_channel(ch_id) or await self.bot.fetch_channel(ch_id)
+                if not channel:
+                    continue
+
+                messages_to_check = [msg_id]
+                pings = self.db.get_custom_reminder_pings(item["reminder_id"])
+                messages_to_check.extend([p["ping_message_id"] for p in pings])
+
+                acked = False
+                for mid in messages_to_check:
+                    if acked:
+                        break
+                    try:
+                        m = await channel.fetch_message(mid)
+                        for reaction in m.reactions:
+                            emoji_str = str(reaction.emoji.name) if reaction.emoji and hasattr(reaction.emoji, "name") and reaction.emoji.name else str(reaction.emoji)
+                            if is_heart_emoji(emoji_str):
+                                async for user in reaction.users():
+                                    if self.bot.user and user.id != self.bot.user.id:
+                                        logger.info("Caught offline heart reaction by %s on %s", user.id, mid)
+                                        self.db.mark_custom_reminder_acknowledged(
+                                            discord_message_id=item["discord_message_id"],
+                                            acknowledged_by=str(user.id),
+                                        )
+                                        await self.bot.update_acknowledged_reminder_message(
+                                            channel_id=ch_id,
+                                            message_id=item["discord_message_id"],
+                                            acknowledged_by_user=user,
+                                            message_text=item["message_text"],
+                                            reacted_message_id=mid,
+                                        )
+                                        acked = True
+                                        break
+                    except Exception:
+                        pass
+        except Exception as e:
+            logger.debug("Offline reaction reconciliation failed: %s", e)
+
     async def start(self):
         # start background loops
         self._is_running = True
@@ -283,6 +328,7 @@ class ReviewScheduler:
 
         async def escalation_loop():
             while self._is_running:
+                await self.reconcile_custom_reminders_once()
                 await self.check_escalations_once()
                 await self.check_custom_reminders_once()
                 await asyncio.sleep(self.escalation_interval)

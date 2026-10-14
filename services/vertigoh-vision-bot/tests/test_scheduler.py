@@ -460,6 +460,46 @@ class TestReviewScheduler(unittest.IsolatedAsyncioTestCase):
         updated = self.db.get_custom_reminder("custom_overdue")
         self.assertEqual(updated["stage"], 1)
 
+    async def test_reconcile_custom_reminders_offline_heart(self):
+        # test offline heart reconciliation
+        self.db.record_custom_reminder(
+            reminder_id="rem_offline",
+            message_text="go to sleep",
+            discord_guild_id=1504290249717710919,
+            discord_channel_id=987654,
+            discord_message_id=999888,
+            target_user_id="259869751130587137",
+            created_by_user_id="264314531818242049",
+        )
+
+        mock_user = MagicMock()
+        mock_user.id = 259869751130587137
+        self.mock_bot.user = MagicMock()
+        self.mock_bot.user.id = 999999999
+
+        mock_reaction = MagicMock()
+        mock_reaction.emoji = MagicMock()
+        mock_reaction.emoji.name = "❤️"
+
+        async def user_generator():
+            yield mock_user
+
+        mock_reaction.users = MagicMock(return_value=user_generator())
+
+        mock_msg = MagicMock()
+        mock_msg.reactions = [mock_reaction]
+
+        mock_channel = MagicMock()
+        mock_channel.fetch_message = AsyncMock(return_value=mock_msg)
+        self.mock_bot.get_channel = MagicMock(return_value=mock_channel)
+        self.mock_bot.update_acknowledged_reminder_message = AsyncMock()
+
+        await self.scheduler.reconcile_custom_reminders_once()
+
+        rem = self.db.get_custom_reminder("rem_offline")
+        self.assertEqual(rem["status"], "REVIEWED")
+        self.mock_bot.update_acknowledged_reminder_message.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

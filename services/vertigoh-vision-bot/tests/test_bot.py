@@ -249,7 +249,225 @@ class TestVertigohVisionBot(unittest.IsolatedAsyncioTestCase):
         # pre-added reactions
         mock_msg.add_reaction.assert_has_calls([call("👀"), call("🎬"), call("↗️"), call("✅")])
 
+    def test_is_heart_emoji(self):
+        # test heart emoji recognition
+        from bot import is_heart_emoji
+        self.assertTrue(is_heart_emoji("❤️"))
+        self.assertTrue(is_heart_emoji("♥️"))
+        self.assertTrue(is_heart_emoji("💖"))
+        self.assertTrue(is_heart_emoji("💗"))
+        self.assertTrue(is_heart_emoji("💓"))
+        self.assertTrue(is_heart_emoji("heart"))
+        self.assertTrue(is_heart_emoji(":heart:"))
+        self.assertTrue(is_heart_emoji("sparkling_heart"))
+        self.assertFalse(is_heart_emoji("👀"))
+        self.assertFalse(is_heart_emoji("✅"))
+        self.assertFalse(is_heart_emoji("random_emoji"))
 
+    async def test_on_raw_reaction_add_heart_stops_custom_reminder(self):
+        # test heart stops reminder
+        from unittest.mock import AsyncMock
+        self.db.record_custom_reminder(
+            reminder_id="rem_heart_test",
+            message_text="go to sleep",
+            discord_guild_id=123,
+            discord_channel_id=456,
+            discord_message_id=888999,
+            target_user_id="259869751130587137",
+            created_by_user_id="264314531818242049",
+        )
+
+        mock_msg = MagicMock()
+        mock_msg.embeds = [MagicMock()]
+        mock_msg.edit = AsyncMock()
+        mock_msg.reply = AsyncMock()
+        mock_channel = MagicMock()
+        mock_channel.fetch_message = AsyncMock(return_value=mock_msg)
+        self.bot.get_channel = MagicMock(return_value=mock_channel)
+
+        mock_user = MagicMock()
+        mock_user.id = 259869751130587137
+        mock_user.mention = "<@259869751130587137>"
+        self.bot.get_user = MagicMock(return_value=mock_user)
+
+        mock_payload = MagicMock()
+        mock_payload.user_id = 259869751130587137
+        mock_payload.message_id = 888999
+        mock_payload.channel_id = 456
+        mock_payload.emoji = MagicMock()
+        mock_payload.emoji.name = "❤️"
+
+        await self.bot.on_raw_reaction_add(mock_payload)
+
+        # verify status updated in db
+        rem = self.db.get_custom_reminder("rem_heart_test")
+        self.assertEqual(rem["status"], "REVIEWED")
+        self.assertEqual(rem["acknowledged_by"], "259869751130587137")
+        mock_msg.edit.assert_called_once()
+        mock_msg.reply.assert_called_once()
+
+    async def test_on_raw_reaction_add_heart_on_ping_stops_custom_reminder(self):
+        # test heart on ping message
+        from unittest.mock import AsyncMock
+        self.db.record_custom_reminder(
+            reminder_id="rem_ping_heart",
+            message_text="go to sleep",
+            discord_guild_id=123,
+            discord_channel_id=456,
+            discord_message_id=888001,
+            target_user_id="259869751130587137",
+            created_by_user_id="264314531818242049",
+        )
+        self.db.record_custom_reminder_ping(
+            ping_message_id=999002,
+            reminder_id="rem_ping_heart",
+            discord_message_id=888001,
+        )
+
+        orig_msg = MagicMock()
+        orig_msg.embeds = [MagicMock()]
+        orig_msg.edit = AsyncMock()
+
+        ping_msg = MagicMock()
+        ping_msg.reply = AsyncMock()
+
+        async def fetch_side_effect(mid):
+            if mid == 888001:
+                return orig_msg
+            return ping_msg
+
+        mock_channel = MagicMock()
+        mock_channel.fetch_message = AsyncMock(side_effect=fetch_side_effect)
+        self.bot.get_channel = MagicMock(return_value=mock_channel)
+
+        mock_user = MagicMock()
+        mock_user.id = 259869751130587137
+        mock_user.mention = "<@259869751130587137>"
+        self.bot.get_user = MagicMock(return_value=mock_user)
+
+        mock_payload = MagicMock()
+        mock_payload.user_id = 259869751130587137
+        mock_payload.message_id = 999002
+        mock_payload.channel_id = 456
+        mock_payload.emoji = MagicMock()
+        mock_payload.emoji.name = "❤️"
+
+        await self.bot.on_raw_reaction_add(mock_payload)
+
+        # verify reminder stopped
+        rem = self.db.get_custom_reminder("rem_ping_heart")
+        self.assertEqual(rem["status"], "REVIEWED")
+        orig_msg.edit.assert_called_once()
+        ping_msg.reply.assert_called_once()
+        self.assertIn("Task stopped", ping_msg.reply.call_args[0][0])
+
+    async def test_on_message_reply_with_heart_stops_reminder(self):
+        # test reply with heart
+        from unittest.mock import AsyncMock
+        self.db.record_custom_reminder(
+            reminder_id="rem_reply_test",
+            message_text="go to sleep",
+            discord_guild_id=123,
+            discord_channel_id=456,
+            discord_message_id=888333,
+            target_user_id="259869751130587137",
+            created_by_user_id="264314531818242049",
+        )
+
+        mock_msg = MagicMock()
+        mock_msg.embeds = [MagicMock()]
+        mock_msg.edit = AsyncMock()
+        mock_msg.reply = AsyncMock()
+
+        mock_channel = MagicMock()
+        mock_channel.id = 456
+        mock_channel.fetch_message = AsyncMock(return_value=mock_msg)
+        self.bot.get_channel = MagicMock(return_value=mock_channel)
+
+        user_msg = MagicMock()
+        user_msg.author = MagicMock()
+        user_msg.author.id = 259869751130587137
+        user_msg.author.mention = "<@259869751130587137>"
+        user_msg.content = "❤️"
+        user_msg.channel = mock_channel
+        user_msg.reference = MagicMock()
+        user_msg.reference.message_id = 888333
+
+        await self.bot.on_message(user_msg)
+
+        rem = self.db.get_custom_reminder("rem_reply_test")
+        self.assertEqual(rem["status"], "REVIEWED")
+        mock_msg.edit.assert_called_once()
+
+    async def test_create_custom_reminder_adds_heart_reaction(self):
+        # test reminder pre-adds heart
+        from unittest.mock import AsyncMock
+        mock_msg = MagicMock()
+        mock_msg.id = 777111
+        mock_msg.add_reaction = AsyncMock()
+        mock_channel = MagicMock()
+        mock_channel.id = 123
+        mock_channel.guild = MagicMock()
+        mock_channel.guild.id = 456
+        mock_channel.send = AsyncMock(return_value=mock_msg)
+
+        target = MagicMock()
+        target.id = 111
+        target.display_name = "Elvis"
+        target.mention = "<@111>"
+
+        author = MagicMock()
+        author.id = 222
+        author.mention = "<@222>"
+
+        sent = await self.bot.create_custom_reminder(
+            channel=mock_channel,
+            target_user=target,
+            message_text="go to sleep",
+            author_user=author,
+        )
+
+        self.assertIsNotNone(sent)
+        mock_msg.add_reaction.assert_called_once_with("❤️")
+        embed = mock_channel.send.call_args.kwargs["embed"]
+        self.assertEqual(embed.footer.text, "React with ❤️ to stop reminder pings")
+
+    async def test_send_custom_escalation_ping_adds_heart_and_records_ping(self):
+        # test ping pre-adds heart
+        from unittest.mock import AsyncMock
+        self.db.record_custom_reminder(
+            reminder_id="remind_555",
+            message_text="go to sleep",
+            discord_guild_id=123,
+            discord_channel_id=456,
+            discord_message_id=555,
+            target_user_id="111",
+            created_by_user_id="222",
+        )
+
+        orig_msg = MagicMock()
+        ping_msg = MagicMock()
+        ping_msg.id = 999555
+        ping_msg.add_reaction = AsyncMock()
+        orig_msg.reply = AsyncMock(return_value=ping_msg)
+
+        mock_channel = MagicMock()
+        mock_channel.fetch_message = AsyncMock(return_value=orig_msg)
+        self.bot.get_channel = MagicMock(return_value=mock_channel)
+
+        success = await self.bot.send_custom_escalation_ping(
+            channel_id=456,
+            message_id=555,
+            stage=0,
+            target_user_id="111",
+            message_text="go to sleep",
+        )
+
+        self.assertTrue(success)
+        ping_msg.add_reaction.assert_called_once_with("❤️")
+        pings = self.db.get_custom_reminder_pings("remind_555")
+        self.assertEqual(len(pings), 1)
+        self.assertEqual(pings[0]["ping_message_id"], 999555)
 
 
 if __name__ == "__main__":

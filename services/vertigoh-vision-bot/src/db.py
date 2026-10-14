@@ -143,6 +143,22 @@ class ReviewDatabase:
             )
             conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS custom_reminder_pings (
+                    ping_message_id INTEGER PRIMARY KEY,
+                    reminder_id TEXT NOT NULL,
+                    discord_message_id INTEGER NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_reminder_pings_rem_id 
+                ON custom_reminder_pings (reminder_id);
+                """
+            )
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS tracked_notion_items (
                     tracking_id TEXT PRIMARY KEY,
                     notion_page_id TEXT NOT NULL,
@@ -532,14 +548,72 @@ class ReviewDatabase:
             )
         return self.get_custom_reminder(reminder_id)
 
+    def record_custom_reminder_ping(
+        self,
+        ping_message_id: int,
+        reminder_id: str,
+        discord_message_id: int,
+        ping_time: Optional[datetime] = None,
+    ):
+        # record reminder ping message
+        now = ping_time or get_current_utc()
+        now_str = to_iso(now)
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO custom_reminder_pings (
+                    ping_message_id, reminder_id, discord_message_id, created_at
+                ) VALUES (?, ?, ?, ?)
+                ON CONFLICT(ping_message_id) DO NOTHING;
+                """,
+                (ping_message_id, reminder_id, discord_message_id, now_str),
+            )
+
+    def get_custom_reminder_pings(self, reminder_id: str) -> List[Dict[str, Any]]:
+        # fetch pings for reminder
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM custom_reminder_pings WHERE reminder_id = ? ORDER BY created_at ASC;",
+                (reminder_id,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_custom_reminder_by_any_message_id(self, message_id: int) -> Optional[Dict[str, Any]]:
+        # find reminder by message
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM custom_reminders WHERE discord_message_id = ?",
+                (message_id,),
+            ).fetchone()
+            if row:
+                return dict(row)
+
+            ping_row = conn.execute(
+                """
+                SELECT r.* FROM custom_reminders r
+                JOIN custom_reminder_pings p ON r.reminder_id = p.reminder_id
+                WHERE p.ping_message_id = ?;
+                """,
+                (message_id,),
+            ).fetchone()
+            return dict(ping_row) if ping_row else None
+
+    def get_all_pending_custom_reminders(self) -> List[Dict[str, Any]]:
+        # fetch all pending reminders
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM custom_reminders WHERE status = 'PENDING' ORDER BY initial_sent_at DESC;"
+            ).fetchall()
+            return [dict(r) for r in rows]
+
     def mark_custom_reminder_acknowledged(
         self,
         discord_message_id: int,
         acknowledged_by: str,
         ack_time: Optional[datetime] = None,
     ) -> Optional[Dict[str, Any]]:
-        """Marks a custom reminder acknowledged by heart reaction, halting further pings."""
-        rem = self.get_custom_reminder_by_message_id(discord_message_id)
+        # mark reminder acknowledged
+        rem = self.get_custom_reminder_by_any_message_id(discord_message_id)
         if not rem:
             return None
 
