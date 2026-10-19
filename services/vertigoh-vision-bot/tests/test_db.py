@@ -20,13 +20,11 @@ class TestReviewDatabase(unittest.TestCase):
         base = datetime(2026, 10, 12, 12, 0, 0, tzinfo=timezone.utc)
         # initial alert ping
         self.assertEqual(calculate_next_ping(0, base), base + timedelta(hours=12))
-        # first reminder
-        self.assertEqual(calculate_next_ping(1, base), base + timedelta(hours=8))
-        # second reminder
-        self.assertEqual(calculate_next_ping(2, base), base + timedelta(hours=4))
-        # recurring pings
-        self.assertEqual(calculate_next_ping(3, base), base + timedelta(hours=2))
-        self.assertEqual(calculate_next_ping(4, base), base + timedelta(hours=2))
+        # subsequent reminder pings max out at 12 hours
+        self.assertEqual(calculate_next_ping(1, base), base + timedelta(hours=12))
+        self.assertEqual(calculate_next_ping(2, base), base + timedelta(hours=12))
+        self.assertEqual(calculate_next_ping(3, base), base + timedelta(hours=12))
+        self.assertEqual(calculate_next_ping(4, base), base + timedelta(hours=12))
 
     def test_record_new_asset(self):
         t0 = datetime(2026, 10, 12, 10, 0, 0, tzinfo=timezone.utc)
@@ -65,41 +63,35 @@ class TestReviewDatabase(unittest.TestCase):
         self.assertEqual(len(due), 1)
         self.assertEqual(due[0]["stage"], 0)
 
-        # advance to stage one
+        # advance stage one
         updated = self.db.advance_escalation_stage("page_escalate", ping_time=t_12h)
         self.assertEqual(updated["stage"], 1)
-        self.assertEqual(from_iso(updated["next_ping_at"]), t_12h + timedelta(hours=8))
+        self.assertEqual(from_iso(updated["next_ping_at"]), t_12h + timedelta(hours=12))
 
         # still not due
-        self.assertEqual(len(self.db.get_due_escalations(t0 + timedelta(hours=19))), 0)
+        self.assertEqual(len(self.db.get_due_escalations(t0 + timedelta(hours=20))), 0)
 
         # due for stage two
-        t_20h = t0 + timedelta(hours=20)
-        due = self.db.get_due_escalations(t_20h)
+        t_24h = t0 + timedelta(hours=24)
+        due = self.db.get_due_escalations(t_24h)
         self.assertEqual(len(due), 1)
         self.assertEqual(due[0]["stage"], 1)
 
         # advance to stage two
-        updated = self.db.advance_escalation_stage("page_escalate", ping_time=t_20h)
+        updated = self.db.advance_escalation_stage("page_escalate", ping_time=t_24h)
         self.assertEqual(updated["stage"], 2)
-        self.assertEqual(from_iso(updated["next_ping_at"]), t_20h + timedelta(hours=4))
+        self.assertEqual(from_iso(updated["next_ping_at"]), t_24h + timedelta(hours=12))
 
         # due for stage three
-        t_24h = t0 + timedelta(hours=24)
-        due = self.db.get_due_escalations(t_24h)
+        t_36h = t0 + timedelta(hours=36)
+        due = self.db.get_due_escalations(t_36h)
         self.assertEqual(len(due), 1)
         self.assertEqual(due[0]["stage"], 2)
 
         # advance to stage three
-        updated = self.db.advance_escalation_stage("page_escalate", ping_time=t_24h)
+        updated = self.db.advance_escalation_stage("page_escalate", ping_time=t_36h)
         self.assertEqual(updated["stage"], 3)
-        self.assertEqual(from_iso(updated["next_ping_at"]), t_24h + timedelta(hours=2))
-
-        # recurring interval check
-        t_26h = t0 + timedelta(hours=26)
-        updated = self.db.advance_escalation_stage("page_escalate", ping_time=t_26h)
-        self.assertEqual(updated["stage"], 4)
-        self.assertEqual(from_iso(updated["next_ping_at"]), t_26h + timedelta(hours=2))
+        self.assertEqual(from_iso(updated["next_ping_at"]), t_36h + timedelta(hours=12))
 
     def test_mark_reviewed(self):
         t0 = datetime(2026, 10, 12, 0, 0, 0, tzinfo=timezone.utc)
@@ -170,10 +162,10 @@ class TestReviewDatabase(unittest.TestCase):
         due = self.db.get_due_custom_reminders(t0 + timedelta(hours=12))
         self.assertEqual(len(due), 1)
 
-        # advance reminder stage
+        # advance reminder stage (12h interval)
         advanced = self.db.advance_custom_reminder_stage("rem_1", ping_time=t0 + timedelta(hours=12))
         self.assertEqual(advanced["stage"], 1)
-        self.assertEqual(from_iso(advanced["next_ping_at"]), t0 + timedelta(hours=20))
+        self.assertEqual(from_iso(advanced["next_ping_at"]), t0 + timedelta(hours=24))
 
         # mark acknowledged
         acked = self.db.mark_custom_reminder_acknowledged(888111, acknowledged_by="264314531818242049")
@@ -187,8 +179,8 @@ class TestReviewDatabase(unittest.TestCase):
     def test_calculate_edit_next_ping(self):
         from db import calculate_edit_next_ping
         base = datetime(2026, 10, 12, 12, 0, 0, tzinfo=timezone.utc)
-        self.assertEqual(calculate_edit_next_ping(0, base), base + timedelta(hours=24))
-        self.assertEqual(calculate_edit_next_ping(1, base), base + timedelta(hours=24))
+        self.assertEqual(calculate_edit_next_ping(0, base), base + timedelta(hours=12))
+        self.assertEqual(calculate_edit_next_ping(1, base), base + timedelta(hours=12))
 
     def test_snooze(self):
         self.assertIsNone(self.db.get_snooze_until())
@@ -237,10 +229,10 @@ class TestReviewDatabase(unittest.TestCase):
         self.assertEqual(item["stage"], 0)
         self.assertEqual(from_iso(item["next_ping_at"]), t0 + timedelta(hours=12))
 
-        # advance
+        # advance (12h interval)
         adv = self.db.advance_notion_item_stage("page_p1:REVIEW", ping_time=t0 + timedelta(hours=12))
         self.assertEqual(adv["stage"], 1)
-        self.assertEqual(from_iso(adv["next_ping_at"]), t0 + timedelta(hours=20))
+        self.assertEqual(from_iso(adv["next_ping_at"]), t0 + timedelta(hours=24))
 
         # resolve
         res = self.db.mark_notion_item_resolved("page_p1:REVIEW")
@@ -248,7 +240,7 @@ class TestReviewDatabase(unittest.TestCase):
         self.assertEqual(len(self.db.get_active_notion_items("REVIEW")), 0)
 
     def test_notion_item_post_lifecycle(self):
-        # test post lifecycle 24h
+        # test post lifecycle 12h
         t0 = datetime(2026, 10, 12, 0, 0, 0, tzinfo=timezone.utc)
         item = self.db.record_notion_item(
             notion_page_id="page_post_db",
@@ -264,12 +256,12 @@ class TestReviewDatabase(unittest.TestCase):
         self.assertEqual(item["tracking_id"], "page_post_db:POST")
         self.assertEqual(item["category"], "POST")
         self.assertEqual(item["stage"], 0)
-        self.assertEqual(from_iso(item["next_ping_at"]), t0 + timedelta(hours=24))
+        self.assertEqual(from_iso(item["next_ping_at"]), t0 + timedelta(hours=12))
 
-        # advance stage 24h
-        adv = self.db.advance_notion_item_stage("page_post_db:POST", ping_time=t0 + timedelta(hours=24))
+        # advance stage 12h
+        adv = self.db.advance_notion_item_stage("page_post_db:POST", ping_time=t0 + timedelta(hours=12))
         self.assertEqual(adv["stage"], 1)
-        self.assertEqual(from_iso(adv["next_ping_at"]), t0 + timedelta(hours=48))
+        self.assertEqual(from_iso(adv["next_ping_at"]), t0 + timedelta(hours=24))
 
         active_posts = self.db.get_active_notion_items("POST")
         self.assertEqual(len(active_posts), 1)
@@ -277,6 +269,42 @@ class TestReviewDatabase(unittest.TestCase):
         res = self.db.mark_notion_item_resolved("page_post_db:POST")
         self.assertEqual(res["status"], "RESOLVED")
         self.assertEqual(len(self.db.get_active_notion_items("POST")), 0)
+
+    def test_notion_item_pings_and_lookup(self):
+        # test notion ping tracking
+        t0 = datetime(2026, 10, 12, 0, 0, 0, tzinfo=timezone.utc)
+        self.db.record_notion_item(
+            notion_page_id="page_ping_test",
+            category="POST",
+            page_title="Ready Video",
+            asset_url="https://vimeo.com/ready1",
+            notion_status="Ready to Post",
+            assigned_users="Elvis",
+            discord_channel_id=111,
+            discord_message_id=555,
+            initial_time=t0,
+        )
+
+        self.db.record_notion_item_ping(
+            ping_message_id=999222,
+            tracking_id="page_ping_test:POST",
+            discord_message_id=555,
+            ping_time=t0 + timedelta(hours=12),
+        )
+
+        pings = self.db.get_notion_item_pings("page_ping_test:POST")
+        self.assertEqual(len(pings), 1)
+        self.assertEqual(pings[0]["ping_message_id"], 999222)
+
+        # lookup by original
+        found_orig = self.db.get_notion_item_by_any_message_id(555)
+        self.assertIsNotNone(found_orig)
+        self.assertEqual(found_orig["tracking_id"], "page_ping_test:POST")
+
+        # lookup by ping
+        found_ping = self.db.get_notion_item_by_any_message_id(999222)
+        self.assertIsNotNone(found_ping)
+        self.assertEqual(found_ping["tracking_id"], "page_ping_test:POST")
 
     def test_custom_reminder_pings_and_lookup(self):
         # test ping tracking

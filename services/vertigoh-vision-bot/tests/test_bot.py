@@ -95,7 +95,7 @@ class TestVertigohVisionBot(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(embed.title, "“Teaser Ep 1”")
         self.assertEqual(embed.fields[0].name, "Poster")
         self.assertEqual(embed.fields[1].name, "Status")
-        self.assertEqual(embed.footer.text, "Next remind in 24h")
+        self.assertEqual(embed.footer.text, "Next remind in 12h")
 
     async def test_send_notion_escalation_post(self):
         # test post escalation content
@@ -122,7 +122,7 @@ class TestVertigohVisionBot(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(success)
         mock_msg.reply.assert_called_once()
         reply_content = mock_msg.reply.call_args.kwargs["content"]
-        self.assertIn("[24h Ready to Post Reminder #1]", reply_content)
+        self.assertIn("[12h Ready to Post Reminder #1]", reply_content)
         self.assertIn(f"<@&{TEAM_ROLE_IDS['elvis']}>", reply_content)
 
     async def test_update_resolved_message_no_reply(self):
@@ -468,6 +468,198 @@ class TestVertigohVisionBot(unittest.IsolatedAsyncioTestCase):
         pings = self.db.get_custom_reminder_pings("remind_555")
         self.assertEqual(len(pings), 1)
         self.assertEqual(pings[0]["ping_message_id"], 999555)
+
+    async def test_send_notion_escalation_adds_reactions_and_records_ping(self):
+        # test notion escalation pre-adds reactions
+        from unittest.mock import AsyncMock
+        self.db.record_notion_item(
+            notion_page_id="page_post_alert",
+            category="POST",
+            page_title="Gr818ers x WSS Event FPV final1",
+            asset_url="https://vimeo.com/gr818",
+            notion_status="Ready to Post",
+            assigned_users="Elvis",
+            discord_channel_id=456,
+            discord_message_id=555,
+        )
+
+        orig_msg = MagicMock()
+        orig_msg.embeds = [MagicMock()]
+        orig_msg.edit = AsyncMock()
+        ping_msg = MagicMock()
+        ping_msg.id = 999666
+        ping_msg.add_reaction = AsyncMock()
+        orig_msg.reply = AsyncMock(return_value=ping_msg)
+
+        mock_channel = MagicMock()
+        mock_channel.fetch_message = AsyncMock(return_value=orig_msg)
+        self.bot.get_channel = MagicMock(return_value=mock_channel)
+
+        success = await self.bot.send_notion_escalation(
+            channel_id=456,
+            message_id=555,
+            stage=0,
+            category="POST",
+            page_title="Gr818ers x WSS Event FPV final1",
+            asset_url="https://vimeo.com/gr818",
+            page_url="https://app.notion.com/p/gr818",
+            assigned_users=["Elvis"],
+        )
+
+        self.assertTrue(success)
+        # verify reactions added
+        ping_msg.add_reaction.assert_any_call("✅")
+        ping_msg.add_reaction.assert_any_call("❤️")
+        # verify ping recorded
+        pings = self.db.get_notion_item_pings("page_post_alert:POST")
+        self.assertEqual(len(pings), 1)
+        self.assertEqual(pings[0]["ping_message_id"], 999666)
+
+    async def test_on_raw_reaction_add_heart_on_notion_ping_stops_reminder(self):
+        # test heart reaction resolves
+        from unittest.mock import AsyncMock
+        mock_notion = MagicMock()
+        mock_notion.update_page_status = MagicMock(return_value=True)
+        self.bot.notion = mock_notion
+
+        self.db.record_notion_item(
+            notion_page_id="page_heart_ack",
+            category="POST",
+            page_title="Gr818ers x WSS Event FPV final1",
+            asset_url="https://vimeo.com/gr818",
+            notion_status="Ready to Post",
+            assigned_users="Elvis",
+            discord_channel_id=456,
+            discord_message_id=555,
+        )
+        self.db.record_notion_item_ping(
+            ping_message_id=999777,
+            tracking_id="page_heart_ack:POST",
+            discord_message_id=555,
+        )
+
+        orig_msg = MagicMock()
+        orig_msg.embeds = [MagicMock()]
+        orig_msg.edit = AsyncMock()
+        ping_msg = MagicMock()
+        ping_msg.reply = AsyncMock()
+
+        mock_channel = MagicMock()
+        mock_channel.fetch_message = AsyncMock(side_effect=lambda mid: ping_msg if mid == 999777 else orig_msg)
+        self.bot.get_channel = MagicMock(return_value=mock_channel)
+
+        payload = MagicMock()
+        payload.user_id = 259869751130587137
+        payload.message_id = 999777
+        payload.channel_id = 456
+        payload.emoji = MagicMock()
+        payload.emoji.name = "❤️"
+
+        await self.bot.on_raw_reaction_add(payload)
+
+        # verify resolved
+        item = self.db.get_notion_item("page_heart_ack:POST")
+        self.assertEqual(item["status"], "RESOLVED")
+        mock_notion.update_page_status.assert_called_once_with("page_heart_ack", "Posted")
+        ping_msg.reply.assert_called_once()
+        self.assertIn("Task acknowledged", ping_msg.reply.call_args.args[0])
+
+    async def test_on_raw_reaction_add_check_on_notion_ping_stops_reminder(self):
+        # test check reaction resolves
+        from unittest.mock import AsyncMock
+        mock_notion = MagicMock()
+        mock_notion.update_page_status = MagicMock(return_value=True)
+        self.bot.notion = mock_notion
+
+        self.db.record_notion_item(
+            notion_page_id="page_check_ack",
+            category="POST",
+            page_title="Gr818ers x WSS Event FPV final1",
+            asset_url="https://vimeo.com/gr818",
+            notion_status="Ready to Post",
+            assigned_users="Elvis",
+            discord_channel_id=456,
+            discord_message_id=555,
+        )
+        self.db.record_notion_item_ping(
+            ping_message_id=999888,
+            tracking_id="page_check_ack:POST",
+            discord_message_id=555,
+        )
+
+        orig_msg = MagicMock()
+        orig_msg.embeds = [MagicMock()]
+        orig_msg.edit = AsyncMock()
+        ping_msg = MagicMock()
+        ping_msg.reply = AsyncMock()
+
+        mock_channel = MagicMock()
+        mock_channel.fetch_message = AsyncMock(side_effect=lambda mid: ping_msg if mid == 999888 else orig_msg)
+        self.bot.get_channel = MagicMock(return_value=mock_channel)
+
+        payload = MagicMock()
+        payload.user_id = 259869751130587137
+        payload.message_id = 999888
+        payload.channel_id = 456
+        payload.emoji = MagicMock()
+        payload.emoji.name = "✅"
+
+        await self.bot.on_raw_reaction_add(payload)
+
+        # verify resolved
+        item = self.db.get_notion_item("page_check_ack:POST")
+        self.assertEqual(item["status"], "RESOLVED")
+        mock_notion.update_page_status.assert_called_once_with("page_check_ack", "Posted")
+        ping_msg.reply.assert_called_once()
+        self.assertIn("Status updated to **Posted**", ping_msg.reply.call_args.args[0])
+
+    async def test_on_message_reply_stops_notion_reminder(self):
+        # test reply to ping resolves
+        from unittest.mock import AsyncMock
+        mock_notion = MagicMock()
+        mock_notion.update_page_status = MagicMock(return_value=True)
+        self.bot.notion = mock_notion
+
+        self.db.record_notion_item(
+            notion_page_id="page_reply_ack",
+            category="POST",
+            page_title="Gr818ers x WSS Event FPV final1",
+            asset_url="https://vimeo.com/gr818",
+            notion_status="Ready to Post",
+            assigned_users="Elvis",
+            discord_channel_id=456,
+            discord_message_id=555,
+        )
+        self.db.record_notion_item_ping(
+            ping_message_id=999999,
+            tracking_id="page_reply_ack:POST",
+            discord_message_id=555,
+        )
+
+        orig_msg = MagicMock()
+        orig_msg.embeds = [MagicMock()]
+        orig_msg.edit = AsyncMock()
+        mock_channel = MagicMock()
+        mock_channel.fetch_message = AsyncMock(return_value=orig_msg)
+        self.bot.get_channel = MagicMock(return_value=mock_channel)
+
+        mock_reply_msg = MagicMock()
+        mock_reply_msg.author = MagicMock()
+        mock_reply_msg.author.id = 259869751130587137
+        mock_reply_msg.author.mention = "<@259869751130587137>"
+        mock_reply_msg.content = "posted"
+        mock_reply_msg.reference = MagicMock()
+        mock_reply_msg.reference.message_id = 999999
+        mock_reply_msg.channel = mock_channel
+        mock_reply_msg.reply = AsyncMock()
+
+        await self.bot.on_message(mock_reply_msg)
+
+        item = self.db.get_notion_item("page_reply_ack:POST")
+        self.assertEqual(item["status"], "RESOLVED")
+        mock_notion.update_page_status.assert_called_once_with("page_reply_ack", "Posted")
+        mock_reply_msg.reply.assert_called_once()
+        self.assertIn("Task acknowledged", mock_reply_msg.reply.call_args.args[0])
 
 
 if __name__ == "__main__":

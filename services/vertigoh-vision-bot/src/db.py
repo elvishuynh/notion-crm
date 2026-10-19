@@ -17,22 +17,15 @@ def from_iso(s: str) -> datetime:
 
 
 def calculate_review_next_ping(stage: int, base_time: Optional[datetime] = None) -> datetime:
-    # calculate review ping deadline
+    # 12h alert deadline
     base = base_time or get_current_utc()
-    if stage == 0:
-        return base + timedelta(hours=12)
-    elif stage == 1:
-        return base + timedelta(hours=8)
-    elif stage == 2:
-        return base + timedelta(hours=4)
-    else:
-        return base + timedelta(hours=2)
+    return base + timedelta(hours=12)
 
 
 def calculate_edit_next_ping(stage: int, base_time: Optional[datetime] = None) -> datetime:
-    # calculate 24h edit deadline
+    # 12h edit deadline
     base = base_time or get_current_utc()
-    return base + timedelta(hours=24)
+    return base + timedelta(hours=12)
 
 
 calculate_next_ping = calculate_review_next_ping
@@ -189,6 +182,22 @@ class ReviewDatabase:
                 """
                 CREATE INDEX IF NOT EXISTS idx_items_page_cat 
                 ON tracked_notion_items (notion_page_id, category);
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS tracked_notion_pings (
+                    ping_message_id INTEGER PRIMARY KEY,
+                    tracking_id TEXT NOT NULL,
+                    discord_message_id INTEGER NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_notion_pings_tracking_id 
+                ON tracked_notion_pings (tracking_id);
                 """
             )
             conn.execute(
@@ -905,3 +914,53 @@ class ReviewDatabase:
                 (discord_message_id,),
             ).fetchone()
             return dict(row) if row else None
+
+    def record_notion_item_ping(
+        self,
+        ping_message_id: int,
+        tracking_id: str,
+        discord_message_id: int,
+        ping_time: Optional[datetime] = None,
+    ):
+        # record notion ping message
+        now = ping_time or get_current_utc()
+        now_str = to_iso(now)
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO tracked_notion_pings (
+                    ping_message_id, tracking_id, discord_message_id, created_at
+                ) VALUES (?, ?, ?, ?)
+                ON CONFLICT(ping_message_id) DO NOTHING;
+                """,
+                (ping_message_id, tracking_id, discord_message_id, now_str),
+            )
+
+    def get_notion_item_pings(self, tracking_id: str) -> List[Dict[str, Any]]:
+        # fetch pings for item
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM tracked_notion_pings WHERE tracking_id = ? ORDER BY created_at ASC;",
+                (tracking_id,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_notion_item_by_any_message_id(self, discord_message_id: int) -> Optional[Dict[str, Any]]:
+        # find item by any message
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM tracked_notion_items WHERE discord_message_id = ?",
+                (discord_message_id,),
+            ).fetchone()
+            if row:
+                return dict(row)
+
+            ping_row = conn.execute(
+                """
+                SELECT i.* FROM tracked_notion_items i
+                JOIN tracked_notion_pings p ON i.tracking_id = p.tracking_id
+                WHERE p.ping_message_id = ?;
+                """,
+                (discord_message_id,),
+            ).fetchone()
+            return dict(ping_row) if ping_row else None

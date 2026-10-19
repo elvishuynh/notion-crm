@@ -319,6 +319,41 @@ class VertigohVisionBot(commands.Bot):
             logger.debug("Failed reminder resolution: %s", e)
         return None
 
+    async def _find_notion_item_from_message(
+        self, channel_id: int, message_id: int
+    ) -> Optional[Dict[str, Any]]:
+        # find notion item from message
+        try:
+            channel = await self._get_destination_channel(channel_id)
+            if not channel:
+                return None
+            msg = await channel.fetch_message(message_id)
+            if not msg:
+                return None
+
+            # check reference
+            if msg.reference and msg.reference.message_id:
+                item = self.db.get_notion_item_by_any_message_id(msg.reference.message_id)
+                if item:
+                    return item
+
+            # match active items
+            active = self.db.get_active_notion_items()
+            content_lower = msg.content.lower().replace("-", "")
+            for item in active:
+                clean_pid = item["notion_page_id"].replace("-", "").lower()
+                clean_title = item["page_title"].strip("“\"'").lower()
+                if (clean_pid and clean_pid in content_lower) or (clean_title and clean_title in msg.content.lower()):
+                    self.db.record_notion_item_ping(
+                        ping_message_id=message_id,
+                        tracking_id=item["tracking_id"],
+                        discord_message_id=item["discord_message_id"],
+                    )
+                    return item
+        except Exception as e:
+            logger.debug("Failed notion resolution: %s", e)
+        return None
+
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
         # handle reaction to alert message
         if self.user and payload.user_id == self.user.id:
@@ -347,7 +382,12 @@ class VertigohVisionBot(commands.Bot):
                     discord_message_id=custom_rem["discord_message_id"],
                     acknowledged_by=str(payload.user_id),
                 )
-                user = self.get_user(payload.user_id) or await self.fetch_user(payload.user_id)
+                user = self.get_user(payload.user_id)
+                if not user:
+                    try:
+                        user = await self.fetch_user(payload.user_id)
+                    except Exception:
+                        user = None
                 await self.update_acknowledged_reminder_message(
                     channel_id=custom_rem["discord_channel_id"],
                     message_id=custom_rem["discord_message_id"],
@@ -357,11 +397,61 @@ class VertigohVisionBot(commands.Bot):
                 )
                 return
 
+            notion_item = self.db.get_notion_item_by_any_message_id(payload.message_id)
+            if not notion_item:
+                notion_item = await self._find_notion_item_from_message(
+                    channel_id=payload.channel_id,
+                    message_id=payload.message_id,
+                )
+
+            if notion_item and notion_item["status"] == "PENDING":
+                cat = notion_item["category"].upper()
+                target_status = "Posted" if cat in ("POST", "READY_TO_POST") else ("Reviewed" if cat == "REVIEW" else "Ready to Post")
+                logger.info(
+                    "Heart reaction '%s' by %s on message %d: stopping notion reminder %s",
+                    emoji_str,
+                    payload.user_id,
+                    payload.message_id,
+                    notion_item["tracking_id"],
+                )
+                await self.apply_status_update(notion_item["notion_page_id"], target_status)
+                self.db.mark_notion_item_resolved(notion_item["tracking_id"])
+                await self.update_resolved_message(
+                    channel_id=notion_item["discord_channel_id"] or payload.channel_id,
+                    message_id=notion_item["discord_message_id"],
+                    page_title=notion_item["page_title"],
+                    category=notion_item["category"],
+                    current_status=target_status,
+                )
+                if payload.message_id != notion_item["discord_message_id"]:
+                    try:
+                        user = self.get_user(payload.user_id)
+                        if not user:
+                            try:
+                                user = await self.fetch_user(payload.user_id)
+                            except Exception:
+                                user = None
+                        mention = user.mention if user else f"<@{payload.user_id}>"
+                        channel = await self._get_destination_channel(payload.channel_id)
+                        if channel:
+                            target_msg = await channel.fetch_message(payload.message_id)
+                            await target_msg.reply(
+                                f"✅ Task acknowledged by {mention}! Reminder pings cleared."
+                            )
+                    except Exception:
+                        pass
+                return
+
         target_status = self.resolve_status_from_emoji(emoji_str)
         if not target_status:
             return
 
-        item = self.db.get_notion_item_by_message_id(payload.message_id)
+        item = self.db.get_notion_item_by_any_message_id(payload.message_id)
+        if not item:
+            item = await self._find_notion_item_from_message(
+                channel_id=payload.channel_id,
+                message_id=payload.message_id,
+            )
         if not item:
             return
 
@@ -373,6 +463,42 @@ class VertigohVisionBot(commands.Bot):
             target_status,
         )
         await self.apply_status_update(item["notion_page_id"], target_status)
+        cat = item["category"].upper()
+        is_resolved = False
+        if cat in ("POST", "READY_TO_POST") and target_status in ("Posted", "Scheduled"):
+            is_resolved = True
+        elif cat == "REVIEW" and target_status != "Review Pending":
+            is_resolved = True
+        elif cat == "EDIT" and target_status not in ("Edit Pending", "Review Pending"):
+            is_resolved = True
+
+        if is_resolved:
+            self.db.mark_notion_item_resolved(item["tracking_id"])
+            await self.update_resolved_message(
+                channel_id=item["discord_channel_id"] or payload.channel_id,
+                message_id=item["discord_message_id"],
+                page_title=item["page_title"],
+                category=item["category"],
+                current_status=target_status,
+            )
+
+        if payload.message_id != item["discord_message_id"]:
+            try:
+                user = self.get_user(payload.user_id)
+                if not user:
+                    try:
+                        user = await self.fetch_user(payload.user_id)
+                    except Exception:
+                        user = None
+                mention = user.mention if user else f"<@{payload.user_id}>"
+                channel = await self._get_destination_channel(payload.channel_id)
+                if channel:
+                    target_msg = await channel.fetch_message(payload.message_id)
+                    await target_msg.reply(
+                        f"✅ Status updated to **{target_status}** by {mention}! Reminder pings cleared."
+                    )
+            except Exception:
+                pass
 
     async def on_message(self, message: discord.Message):
         # handle reply with emoji
@@ -383,7 +509,7 @@ class VertigohVisionBot(commands.Bot):
             cleaned = message.content.strip()
 
             # check heart reply
-            if is_heart_emoji(cleaned) or cleaned.lower() in ("done", "stop", "acknowledged"):
+            if is_heart_emoji(cleaned) or cleaned.lower() in ("done", "stop", "acknowledged", "posted", "scheduled"):
                 custom_rem = self.db.get_custom_reminder_by_any_message_id(message.reference.message_id)
                 if not custom_rem:
                     custom_rem = await self._find_custom_reminder_from_message(
@@ -410,9 +536,60 @@ class VertigohVisionBot(commands.Bot):
                     )
                     return
 
+                notion_item = self.db.get_notion_item_by_any_message_id(message.reference.message_id)
+                if not notion_item:
+                    notion_item = await self._find_notion_item_from_message(
+                        channel_id=message.channel.id,
+                        message_id=message.reference.message_id,
+                    )
+                if notion_item and notion_item["status"] == "PENDING":
+                    cat = notion_item["category"].upper()
+                    clean_lower = cleaned.lower()
+                    if clean_lower == "scheduled":
+                        target_status = "Scheduled"
+                    elif clean_lower in ("posted", "done"):
+                        target_status = "Posted"
+                    elif cat in ("POST", "READY_TO_POST"):
+                        target_status = "Posted"
+                    elif cat == "REVIEW":
+                        target_status = "Reviewed"
+                    elif cat == "EDIT":
+                        target_status = "Ready to Post"
+                    else:
+                        target_status = "Resolved"
+
+                    logger.info(
+                        "Reply '%s' on message %d: acknowledging Notion item %s with status '%s'",
+                        cleaned,
+                        message.reference.message_id,
+                        notion_item["tracking_id"],
+                        target_status,
+                    )
+                    await self.apply_status_update(notion_item["notion_page_id"], target_status)
+                    self.db.mark_notion_item_resolved(notion_item["tracking_id"])
+                    await self.update_resolved_message(
+                        channel_id=notion_item["discord_channel_id"] or message.channel.id,
+                        message_id=notion_item["discord_message_id"],
+                        page_title=notion_item["page_title"],
+                        category=notion_item["category"],
+                        current_status=target_status,
+                    )
+                    try:
+                        await message.reply(
+                            f"✅ Task acknowledged by {message.author.mention}! Reminder pings cleared."
+                        )
+                    except Exception:
+                        pass
+                    return
+
             target_status = self.resolve_status_from_emoji(cleaned)
             if target_status:
-                item = self.db.get_notion_item_by_message_id(message.reference.message_id)
+                item = self.db.get_notion_item_by_any_message_id(message.reference.message_id)
+                if not item:
+                    item = await self._find_notion_item_from_message(
+                        channel_id=message.channel.id,
+                        message_id=message.reference.message_id,
+                    )
                 if item:
                     logger.info(
                         "Reply '%s' on message %d: updating Notion page %s status to '%s'",
@@ -422,6 +599,30 @@ class VertigohVisionBot(commands.Bot):
                         target_status,
                     )
                     await self.apply_status_update(item["notion_page_id"], target_status)
+                    cat = item["category"].upper()
+                    is_resolved = False
+                    if cat in ("POST", "READY_TO_POST") and target_status in ("Posted", "Scheduled"):
+                        is_resolved = True
+                    elif cat == "REVIEW" and target_status != "Review Pending":
+                        is_resolved = True
+                    elif cat == "EDIT" and target_status not in ("Edit Pending", "Review Pending"):
+                        is_resolved = True
+
+                    if is_resolved:
+                        self.db.mark_notion_item_resolved(item["tracking_id"])
+                        await self.update_resolved_message(
+                            channel_id=item["discord_channel_id"] or message.channel.id,
+                            message_id=item["discord_message_id"],
+                            page_title=item["page_title"],
+                            category=item["category"],
+                            current_status=target_status,
+                        )
+                    try:
+                        await message.reply(
+                            f"✅ Status updated to **{target_status}** by {message.author.mention}! Reminder pings cleared."
+                        )
+                    except Exception:
+                        pass
 
         await self.process_commands(message)
 
@@ -509,7 +710,7 @@ class VertigohVisionBot(commands.Bot):
         )
         embed.add_field(name="Editor", value=mentions_str, inline=True)
         embed.add_field(name="Status", value=format_status("Edit Pending"), inline=True)
-        embed.set_footer(text="Next remind in 24h")
+        embed.set_footer(text="Next remind in 12h")
 
         try:
             msg = await channel.send(
@@ -554,7 +755,7 @@ class VertigohVisionBot(commands.Bot):
         )
         embed.add_field(name="Poster", value=mentions_str, inline=True)
         embed.add_field(name="Status", value=format_status("Ready to Post"), inline=True)
-        embed.set_footer(text="Next remind in 24h")
+        embed.set_footer(text="Next remind in 12h")
 
         try:
             msg = await channel.send(
@@ -580,6 +781,7 @@ class VertigohVisionBot(commands.Bot):
         asset_url: str,
         page_url: str,
         assigned_users: List[str],
+        notion_page_id: Optional[str] = None,
     ) -> bool:
         # send reminder ping
         channel = await self._get_destination_channel(channel_id)
@@ -594,47 +796,67 @@ class VertigohVisionBot(commands.Bot):
 
         if cat_upper == "EDIT":
             content = (
-                f"⏰ **[24h Edit Reminder #{stage + 1}]** {mentions_str} — **{display_title}** is still pending edits\n"
+                f"⏰ **[12h Edit Reminder #{stage + 1}]** {mentions_str} — **{display_title}** is still pending edits\n"
                 f"[Content Schedule]({page_url})"
             )
-            next_h = "24h"
+            next_h = "12h"
         elif cat_upper in ("POST", "READY_TO_POST"):
             content = (
-                f"🚀 **[24h Ready to Post Reminder #{stage + 1}]** {mentions_str} — **{display_title}** is ready to post\n"
+                f"🚀 **[12h Ready to Post Reminder #{stage + 1}]** {mentions_str} — **{display_title}** is ready to post\n"
                 f"[Content Schedule]({page_url})"
             )
-            next_h = "24h"
+            next_h = "12h"
         else:
-            # review escalation header
-            if stage == 0:
-                header = "⚠️ **[12-Hour Review Reminder]**"
-                next_h = "8h"
-            elif stage == 1:
-                header = "🚨 **[20-Hour Review Reminder]**"
-                next_h = "4h"
-            elif stage == 2:
-                header = "🔥 **[24-Hour Urgent Review Reminder]**"
-                next_h = "2h"
-            else:
-                header = f"⏰ **[Review Overdue - Cycle {stage - 2}]**"
-                next_h = "2h"
-
+            # 12h review reminder header
             content = (
-                f"{header} {mentions_str} — **{display_title}** is still pending review\n"
+                f"⚠️ **[12h Review Reminder #{stage + 1}]** {mentions_str} — **{display_title}** is still pending review\n"
                 f"[Content Schedule]({page_url})"
             )
+            next_h = "12h"
 
         try:
+            ping_msg = None
             try:
                 orig_msg = await channel.fetch_message(message_id)
-                await orig_msg.reply(content=content, allowed_mentions=discord.AllowedMentions(roles=True, users=True))
+                ping_msg = await orig_msg.reply(content=content, allowed_mentions=discord.AllowedMentions(roles=True, users=True))
                 # update original embed footer
                 if orig_msg.embeds:
                     embed = orig_msg.embeds[0]
                     embed.set_footer(text=f"Next remind in {next_h}")
                     await orig_msg.edit(embed=embed)
             except Exception:
-                await channel.send(content=content, allowed_mentions=discord.AllowedMentions(roles=True, users=True))
+                ping_msg = await channel.send(content=content, allowed_mentions=discord.AllowedMentions(roles=True, users=True))
+
+            if ping_msg:
+                # add acknowledgment reactions
+                if cat_upper in ("POST", "READY_TO_POST"):
+                    reactions_to_add = ["✅", "❤️"]
+                elif cat_upper == "EDIT":
+                    reactions_to_add = ["🎬", "↗️", "✅", "❤️"]
+                else:
+                    reactions_to_add = ["👀", "🎬", "↗️", "✅", "❤️"]
+
+                for r_emoji in reactions_to_add:
+                    try:
+                        await ping_msg.add_reaction(r_emoji)
+                    except Exception as e:
+                        logger.warning("Could not add reaction %s to escalation ping: %s", r_emoji, e)
+
+                # record ping for lookup
+                tracking_id = None
+                if notion_page_id:
+                    tracking_id = f"{notion_page_id}:{cat_upper}"
+                else:
+                    existing_item = self.db.get_notion_item_by_message_id(message_id)
+                    if existing_item:
+                        tracking_id = existing_item["tracking_id"]
+
+                if tracking_id:
+                    self.db.record_notion_item_ping(
+                        ping_message_id=ping_msg.id,
+                        tracking_id=tracking_id,
+                        discord_message_id=message_id,
+                    )
             return True
         except Exception as e:
             logger.error("Failed to send escalation ping: %s", e)

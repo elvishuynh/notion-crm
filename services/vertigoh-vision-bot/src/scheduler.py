@@ -316,6 +316,54 @@ class ReviewScheduler:
         except Exception as e:
             logger.debug("Offline reaction reconciliation failed: %s", e)
 
+    async def reconcile_notion_reminders_once(self):
+        # catch offline notion reactions
+        try:
+            pending_items = self.db.get_active_notion_items()
+            for item in pending_items:
+                ch_id = item["discord_channel_id"] or self.channel_id
+                msg_id = item["discord_message_id"]
+                channel = self.bot.get_channel(ch_id) or await self.bot.fetch_channel(ch_id)
+                if not channel:
+                    continue
+
+                messages_to_check = [msg_id]
+                pings = self.db.get_notion_item_pings(item["tracking_id"])
+                messages_to_check.extend([p["ping_message_id"] for p in pings])
+
+                resolved = False
+                for mid in messages_to_check:
+                    if resolved:
+                        break
+                    try:
+                        m = await channel.fetch_message(mid)
+                        for reaction in m.reactions:
+                            emoji_str = str(reaction.emoji.name) if reaction.emoji and hasattr(reaction.emoji, "name") and reaction.emoji.name else str(reaction.emoji)
+                            target_status = self.bot.resolve_status_from_emoji(emoji_str)
+                            is_heart = is_heart_emoji(emoji_str)
+                            if target_status or is_heart:
+                                async for user in reaction.users():
+                                    if self.bot.user and user.id != self.bot.user.id:
+                                        if is_heart:
+                                            cat = item["category"].upper()
+                                            target_status = "Posted" if cat in ("POST", "READY_TO_POST") else ("Reviewed" if cat == "REVIEW" else "Ready to Post")
+                                        logger.info("Caught offline reaction %s by %s on notion item %s", emoji_str, user.id, item["tracking_id"])
+                                        await self.bot.apply_status_update(item["notion_page_id"], target_status)
+                                        self.db.mark_notion_item_resolved(item["tracking_id"])
+                                        await self.bot.update_resolved_message(
+                                            channel_id=ch_id,
+                                            message_id=item["discord_message_id"],
+                                            page_title=item["page_title"],
+                                            category=item["category"],
+                                            current_status=target_status,
+                                        )
+                                        resolved = True
+                                        break
+                    except Exception:
+                        pass
+        except Exception as e:
+            logger.debug("Offline notion reconciliation failed: %s", e)
+
     async def start(self):
         # start background loops
         self._is_running = True
@@ -329,6 +377,7 @@ class ReviewScheduler:
         async def escalation_loop():
             while self._is_running:
                 await self.reconcile_custom_reminders_once()
+                await self.reconcile_notion_reminders_once()
                 await self.check_escalations_once()
                 await self.check_custom_reminders_once()
                 await asyncio.sleep(self.escalation_interval)

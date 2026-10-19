@@ -3,14 +3,9 @@
 Monitors Notion content schedule boards for new video/media assets and posts review alerts to Discord with escalating reminders until acknowledged.
 
 ## Features
-- **Immediate Alerting**: Posts a rich embed with the asset link and pre-reacts with ❤️ for review.
-- **Escalation Schedule**:
-  - $T_0$: Immediate notification.
-  - +12h: 1st Reminder ping.
-  - +8h: 2nd Reminder ping.
-  - +4h: 3rd Reminder ping.
-  - +2h recurring: Subsequent pings until acknowledged.
-- **Reaction Resolution**: Real-time heart reaction listener (`❤️`, `💖`, etc.) updates status to `REVIEWED` and stops future reminders.
+- **Immediate Alerting**: Posts a rich embed with the asset link and action reactions.
+- **Escalation Schedule**: Alert reminders ping at a maximum interval of every 12 hours until acknowledged or resolved.
+- **Reaction and Reply Resolution**: Reacting to alerts or pings (`❤️`, `✅`, status emojis) or replying with keywords (`posted`, `scheduled`, `done`, `stop`, `acknowledged`) updates Notion and clears reminder pings.
 - **Custom Reminders**: `/remind` slash command with escalating reminders for ad-hoc tasks.
 - **Persistent State**: SQLite store persists asset status, message IDs, and ping schedules.
 

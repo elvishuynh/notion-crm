@@ -47,18 +47,19 @@ Utility functions in `Code.gs`:
 Monitors Notion content schedule boards for assets, pings team members in Discord, and runs escalating reminders
 
 ### Pipeline Stages
-- Review Pending: alerts reviewers, pings at 12h, 8h, 4h, then every 2h until reviewed
-- Edit Pending: alerts editors, pings every 24h
-- Ready to Post: alerts posters, pings every 24h until scheduled or posted
+- Review Pending: alerts reviewers, pings every 12h until reviewed
+- Edit Pending: alerts editors, pings every 12h until edited
+- Ready to Post: alerts posters, pings every 12h until scheduled or posted
 
 ### Reaction and Status Sync
-Alert embeds include action emojis:
+Alert embeds and reminder pings include action emojis:
 - 👀 Review Pending
 - 🎬 Edit Pending
 - ↗️ Ready to Post
 - ✅ Posted
+- ❤️ Acknowledge and resolve
 
-Reacting with an emoji or replying with it updates the page status in Notion directly and stops reminder pings
+Reacting with an emoji or replying with a keyword or emoji (`posted`, `scheduled`, `done`, `stop`, `acknowledged`, `❤️`) updates the page status in Notion directly and stops reminder pings.
 
 ### Commands
 - `/remind <target> <message>`: schedule escalating task reminder for a team member
