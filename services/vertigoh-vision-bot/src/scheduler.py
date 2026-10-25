@@ -209,11 +209,13 @@ class ReviewScheduler:
 
             due_items = self.db.get_due_notion_items()
             for item in due_items:
+                category = item["category"]
+                if category.upper() == "EDIT":
+                    continue
                 tracking_id = item["tracking_id"]
                 stage = item["stage"]
                 channel_id = item["discord_channel_id"] or self.channel_id
                 message_id = item["discord_message_id"]
-                category = item["category"]
                 assigned = [u.strip() for u in item["assigned_users"].split(",") if u.strip()]
 
                 channel = self.bot.get_channel(channel_id)

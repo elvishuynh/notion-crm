@@ -310,7 +310,7 @@ class VertigohVisionBot(commands.Bot):
                 if rem:
                     return rem
 
-            if "Reminder Ping" in msg.content:
+            if "Reminder" in msg.content:
                 pending = self.db.get_all_pending_custom_reminders()
                 for r in pending:
                     if r["discord_channel_id"] == channel_id and r["message_text"] in msg.content:
@@ -710,7 +710,7 @@ class VertigohVisionBot(commands.Bot):
         )
         embed.add_field(name="Editor", value=mentions_str, inline=True)
         embed.add_field(name="Status", value=format_status("Edit Pending"), inline=True)
-        embed.set_footer(text="Next remind in 12h")
+        embed.set_footer(text="One-time alert")
 
         try:
             msg = await channel.send(
@@ -791,28 +791,24 @@ class VertigohVisionBot(commands.Bot):
         guild = channel.guild if hasattr(channel, "guild") else None
         mentions_str = self.resolve_role_mentions(assigned_users, guild)
         cat_upper = category.upper()
-        clean_title = page_title.strip()
-        display_title = clean_title if clean_title.startswith("“") or clean_title.startswith('"') else f"“{clean_title}”"
 
         if cat_upper == "EDIT":
-            content = (
-                f"⏰ **[12h Edit Reminder #{stage + 1}]** {mentions_str} — **{display_title}** is still pending edits\n"
-                f"[Content Schedule]({page_url})"
-            )
-            next_h = "12h"
+            content = f"⏰ {mentions_str} Reminder #{stage + 1} — Edit pending"
         elif cat_upper in ("POST", "READY_TO_POST"):
-            content = (
-                f"🚀 **[12h Ready to Post Reminder #{stage + 1}]** {mentions_str} — **{display_title}** is ready to post\n"
-                f"[Content Schedule]({page_url})"
-            )
-            next_h = "12h"
+            content = f"🚀 {mentions_str} Reminder #{stage + 1} — Ready to post"
         else:
-            # 12h review reminder header
-            content = (
-                f"⚠️ **[12h Review Reminder #{stage + 1}]** {mentions_str} — **{display_title}** is still pending review\n"
-                f"[Content Schedule]({page_url})"
-            )
-            next_h = "12h"
+            content = f"⚠️ {mentions_str} Reminder #{stage + 1} — Review pending"
+        next_h = "12h"
+
+        tracking_id = None
+        if notion_page_id:
+            tracking_id = f"{notion_page_id}:{cat_upper}"
+        else:
+            existing_item = self.db.get_notion_item_by_message_id(message_id)
+            if existing_item:
+                tracking_id = existing_item["tracking_id"]
+
+        prev_pings = self.db.get_notion_item_pings(tracking_id) if tracking_id else []
 
         try:
             ping_msg = None
@@ -828,6 +824,17 @@ class VertigohVisionBot(commands.Bot):
                 ping_msg = await channel.send(content=content, allowed_mentions=discord.AllowedMentions(roles=True, users=True))
 
             if ping_msg:
+                # delete previous pings
+                for prev in prev_pings:
+                    prev_id = prev.get("ping_message_id")
+                    if prev_id and prev_id != ping_msg.id:
+                        try:
+                            old_msg = await channel.fetch_message(prev_id)
+                            await old_msg.delete()
+                        except Exception:
+                            pass
+                        self.db.delete_notion_item_ping(prev_id)
+
                 # add acknowledgment reactions
                 if cat_upper in ("POST", "READY_TO_POST"):
                     reactions_to_add = ["✅", "❤️"]
@@ -841,15 +848,6 @@ class VertigohVisionBot(commands.Bot):
                         await ping_msg.add_reaction(r_emoji)
                     except Exception as e:
                         logger.warning("Could not add reaction %s to escalation ping: %s", r_emoji, e)
-
-                # record ping for lookup
-                tracking_id = None
-                if notion_page_id:
-                    tracking_id = f"{notion_page_id}:{cat_upper}"
-                else:
-                    existing_item = self.db.get_notion_item_by_message_id(message_id)
-                    if existing_item:
-                        tracking_id = existing_item["tracking_id"]
 
                 if tracking_id:
                     self.db.record_notion_item_ping(
@@ -1018,7 +1016,11 @@ class VertigohVisionBot(commands.Bot):
             return False
 
         mention_str = f"<@{target_user_id}>"
-        content = f"⏰ **[Reminder Ping]** {mention_str} — Task: *{message_text}*"
+        content = f"⏰ {mention_str} Reminder #{stage + 1}: {message_text}"
+
+        rem = self.db.get_custom_reminder_by_message_id(message_id)
+        rem_id = rem["reminder_id"] if rem else f"remind_{message_id}"
+        prev_pings = self.db.get_custom_reminder_pings(rem_id) if rem_id else []
 
         try:
             ping_msg = None
@@ -1029,15 +1031,23 @@ class VertigohVisionBot(commands.Bot):
                 ping_msg = await channel.send(content=content)
 
             if ping_msg:
+                # delete previous pings
+                for prev in prev_pings:
+                    prev_id = prev.get("ping_message_id")
+                    if prev_id and prev_id != ping_msg.id:
+                        try:
+                            old_msg = await channel.fetch_message(prev_id)
+                            await old_msg.delete()
+                        except Exception:
+                            pass
+                        self.db.delete_custom_reminder_ping(prev_id)
+
                 # pre-add heart reaction
                 try:
                     await ping_msg.add_reaction("❤️")
                 except Exception as e:
                     logger.warning("Could not add reaction: %s", e)
 
-                # record ping id
-                rem = self.db.get_custom_reminder_by_message_id(message_id)
-                rem_id = rem["reminder_id"] if rem else f"remind_{message_id}"
                 self.db.record_custom_reminder_ping(
                     ping_message_id=ping_msg.id,
                     reminder_id=rem_id,

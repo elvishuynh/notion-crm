@@ -22,8 +22,13 @@ def calculate_review_next_ping(stage: int, base_time: Optional[datetime] = None)
     return base + timedelta(hours=12)
 
 
-def calculate_edit_next_ping(stage: int, base_time: Optional[datetime] = None) -> datetime:
-    # 12h edit deadline
+def calculate_edit_next_ping(stage: int, base_time: Optional[datetime] = None) -> Optional[datetime]:
+    # editors never reminded
+    return None
+
+
+def calculate_post_next_ping(stage: int, base_time: Optional[datetime] = None) -> datetime:
+    # 12h alert deadline
     base = base_time or get_current_utc()
     return base + timedelta(hours=12)
 
@@ -584,8 +589,16 @@ class ReviewDatabase:
             rows = conn.execute(
                 "SELECT * FROM custom_reminder_pings WHERE reminder_id = ? ORDER BY created_at ASC;",
                 (reminder_id,),
-            ).fetchall()
+            )
             return [dict(r) for r in rows]
+
+    def delete_custom_reminder_ping(self, ping_message_id: int):
+        # delete ping record
+        with self._get_connection() as conn:
+            conn.execute(
+                "DELETE FROM custom_reminder_pings WHERE ping_message_id = ?;",
+                (ping_message_id,),
+            )
 
     def get_custom_reminder_by_any_message_id(self, message_id: int) -> Optional[Dict[str, Any]]:
         # find reminder by message
@@ -767,11 +780,14 @@ class ReviewDatabase:
         now = initial_time or get_current_utc()
         now_str = to_iso(now)
         cat_upper = category.upper()
-        if cat_upper in ("EDIT", "POST", "READY_TO_POST"):
-            next_ping = calculate_edit_next_ping(stage=0, base_time=now)
+        if cat_upper == "EDIT":
+            next_ping_str = "9999-12-31T23:59:59+00:00"
+        elif cat_upper in ("POST", "READY_TO_POST"):
+            next_ping = calculate_post_next_ping(stage=0, base_time=now)
+            next_ping_str = to_iso(next_ping)
         else:
             next_ping = calculate_review_next_ping(stage=0, base_time=now)
-        next_ping_str = to_iso(next_ping)
+            next_ping_str = to_iso(next_ping)
 
         with self._get_connection() as conn:
             conn.execute(
@@ -846,7 +862,7 @@ class ReviewDatabase:
             rows = conn.execute(
                 """
                 SELECT * FROM tracked_notion_items
-                WHERE status = 'PENDING' AND next_ping_at <= ?
+                WHERE status = 'PENDING' AND category != 'EDIT' AND next_ping_at <= ?
                 ORDER BY next_ping_at ASC;
                 """,
                 (now_str,),
@@ -863,10 +879,14 @@ class ReviewDatabase:
         if not item or item["status"] != "PENDING":
             return None
 
+        cat_upper = item["category"].upper()
+        if cat_upper == "EDIT":
+            return item
+
         now = ping_time or get_current_utc()
         next_stage = item["stage"] + 1
-        if item["category"] in ("EDIT", "POST", "READY_TO_POST"):
-            next_ping = calculate_edit_next_ping(stage=next_stage, base_time=now)
+        if cat_upper in ("POST", "READY_TO_POST"):
+            next_ping = calculate_post_next_ping(stage=next_stage, base_time=now)
         else:
             next_ping = calculate_review_next_ping(stage=next_stage, base_time=now)
 
@@ -942,8 +962,16 @@ class ReviewDatabase:
             rows = conn.execute(
                 "SELECT * FROM tracked_notion_pings WHERE tracking_id = ? ORDER BY created_at ASC;",
                 (tracking_id,),
-            ).fetchall()
+            )
             return [dict(r) for r in rows]
+
+    def delete_notion_item_ping(self, ping_message_id: int):
+        # delete notion ping record
+        with self._get_connection() as conn:
+            conn.execute(
+                "DELETE FROM tracked_notion_pings WHERE ping_message_id = ?;",
+                (ping_message_id,),
+            )
 
     def get_notion_item_by_any_message_id(self, discord_message_id: int) -> Optional[Dict[str, Any]]:
         # find item by any message

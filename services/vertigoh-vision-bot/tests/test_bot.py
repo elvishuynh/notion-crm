@@ -122,7 +122,7 @@ class TestVertigohVisionBot(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(success)
         mock_msg.reply.assert_called_once()
         reply_content = mock_msg.reply.call_args.kwargs["content"]
-        self.assertIn("[12h Ready to Post Reminder #1]", reply_content)
+        self.assertIn("Reminder #1 — Ready to post", reply_content)
         self.assertIn(f"<@&{TEAM_ROLE_IDS['elvis']}>", reply_content)
 
     async def test_update_resolved_message_no_reply(self):
@@ -514,6 +514,138 @@ class TestVertigohVisionBot(unittest.IsolatedAsyncioTestCase):
         pings = self.db.get_notion_item_pings("page_post_alert:POST")
         self.assertEqual(len(pings), 1)
         self.assertEqual(pings[0]["ping_message_id"], 999666)
+
+    async def test_send_notion_escalation_rolling_deletes_previous_ping(self):
+        # test rolling single alert
+        from unittest.mock import AsyncMock
+        self.db.record_notion_item(
+            notion_page_id="page_rolling_test",
+            category="REVIEW",
+            page_title="Interview Ep 2",
+            asset_url="https://vimeo.com/ep2",
+            notion_status="Review Pending",
+            assigned_users="Roger",
+            discord_channel_id=456,
+            discord_message_id=555,
+        )
+
+        orig_msg = MagicMock()
+        orig_msg.embeds = [MagicMock()]
+        orig_msg.edit = AsyncMock()
+
+        ping_msg1 = MagicMock()
+        ping_msg1.id = 1001
+        ping_msg1.delete = AsyncMock()
+        ping_msg1.add_reaction = AsyncMock()
+
+        ping_msg2 = MagicMock()
+        ping_msg2.id = 1002
+        ping_msg2.delete = AsyncMock()
+        ping_msg2.add_reaction = AsyncMock()
+
+        orig_msg.reply = AsyncMock(side_effect=[ping_msg1, ping_msg2])
+
+        mock_channel = MagicMock()
+        async def fetch_msg(mid):
+            if mid == 555:
+                return orig_msg
+            if mid == 1001:
+                return ping_msg1
+            if mid == 1002:
+                return ping_msg2
+            return None
+        mock_channel.fetch_message = AsyncMock(side_effect=fetch_msg)
+        self.bot.get_channel = MagicMock(return_value=mock_channel)
+
+        await self.bot.send_notion_escalation(
+            channel_id=456,
+            message_id=555,
+            stage=0,
+            category="REVIEW",
+            page_title="Interview Ep 2",
+            asset_url="https://vimeo.com/ep2",
+            page_url="https://notion.so/ep2",
+            assigned_users=["Roger"],
+        )
+        pings = self.db.get_notion_item_pings("page_rolling_test:REVIEW")
+        self.assertEqual(len(pings), 1)
+        self.assertEqual(pings[0]["ping_message_id"], 1001)
+
+        await self.bot.send_notion_escalation(
+            channel_id=456,
+            message_id=555,
+            stage=1,
+            category="REVIEW",
+            page_title="Interview Ep 2",
+            asset_url="https://vimeo.com/ep2",
+            page_url="https://notion.so/ep2",
+            assigned_users=["Roger"],
+        )
+        ping_msg1.delete.assert_called_once()
+        pings_after = self.db.get_notion_item_pings("page_rolling_test:REVIEW")
+        self.assertEqual(len(pings_after), 1)
+        self.assertEqual(pings_after[0]["ping_message_id"], 1002)
+
+    async def test_send_custom_escalation_rolling_deletes_previous_ping(self):
+        # test rolling custom ping
+        from unittest.mock import AsyncMock
+        self.db.record_custom_reminder(
+            reminder_id="remind_rolling",
+            message_text="Deliver export",
+            discord_guild_id=123,
+            discord_channel_id=456,
+            discord_message_id=555,
+            target_user_id="111",
+            created_by_user_id="222",
+        )
+
+        orig_msg = MagicMock()
+        ping_msg1 = MagicMock()
+        ping_msg1.id = 2001
+        ping_msg1.delete = AsyncMock()
+        ping_msg1.add_reaction = AsyncMock()
+
+        ping_msg2 = MagicMock()
+        ping_msg2.id = 2002
+        ping_msg2.delete = AsyncMock()
+        ping_msg2.add_reaction = AsyncMock()
+
+        orig_msg.reply = AsyncMock(side_effect=[ping_msg1, ping_msg2])
+
+        mock_channel = MagicMock()
+        async def fetch_msg(mid):
+            if mid == 555:
+                return orig_msg
+            if mid == 2001:
+                return ping_msg1
+            if mid == 2002:
+                return ping_msg2
+            return None
+        mock_channel.fetch_message = AsyncMock(side_effect=fetch_msg)
+        self.bot.get_channel = MagicMock(return_value=mock_channel)
+
+        await self.bot.send_custom_escalation_ping(
+            channel_id=456,
+            message_id=555,
+            stage=0,
+            target_user_id="111",
+            message_text="Deliver export",
+        )
+        pings = self.db.get_custom_reminder_pings("remind_rolling")
+        self.assertEqual(len(pings), 1)
+        self.assertEqual(pings[0]["ping_message_id"], 2001)
+
+        await self.bot.send_custom_escalation_ping(
+            channel_id=456,
+            message_id=555,
+            stage=1,
+            target_user_id="111",
+            message_text="Deliver export",
+        )
+        ping_msg1.delete.assert_called_once()
+        pings_after = self.db.get_custom_reminder_pings("remind_rolling")
+        self.assertEqual(len(pings_after), 1)
+        self.assertEqual(pings_after[0]["ping_message_id"], 2002)
 
     async def test_on_raw_reaction_add_heart_on_notion_ping_stops_reminder(self):
         # test heart reaction resolves

@@ -179,8 +179,25 @@ class TestReviewDatabase(unittest.TestCase):
     def test_calculate_edit_next_ping(self):
         from db import calculate_edit_next_ping
         base = datetime(2026, 10, 12, 12, 0, 0, tzinfo=timezone.utc)
-        self.assertEqual(calculate_edit_next_ping(0, base), base + timedelta(hours=12))
-        self.assertEqual(calculate_edit_next_ping(1, base), base + timedelta(hours=12))
+        self.assertIsNone(calculate_edit_next_ping(0, base))
+        self.assertIsNone(calculate_edit_next_ping(1, base))
+
+    def test_edit_item_not_in_due_items(self):
+        # edit item never due
+        t0 = datetime(2026, 10, 12, 0, 0, 0, tzinfo=timezone.utc)
+        self.db.record_notion_item(
+            notion_page_id="page_edit_no_escalate",
+            category="EDIT",
+            page_title="Edit Task",
+            asset_url="https://vimeo.com/edit",
+            notion_status="Edit Pending",
+            assigned_users="Kai",
+            discord_channel_id=111,
+            discord_message_id=222,
+            initial_time=t0,
+        )
+        due = self.db.get_due_notion_items(t0 + timedelta(days=10))
+        self.assertEqual(len(due), 0)
 
     def test_snooze(self):
         self.assertIsNone(self.db.get_snooze_until())
@@ -306,6 +323,10 @@ class TestReviewDatabase(unittest.TestCase):
         self.assertIsNotNone(found_ping)
         self.assertEqual(found_ping["tracking_id"], "page_ping_test:POST")
 
+        # test delete ping
+        self.db.delete_notion_item_ping(999222)
+        self.assertEqual(len(self.db.get_notion_item_pings("page_ping_test:POST")), 0)
+
     def test_custom_reminder_pings_and_lookup(self):
         # test ping tracking
         t0 = datetime(2026, 10, 12, 0, 0, 0, tzinfo=timezone.utc)
@@ -347,6 +368,10 @@ class TestReviewDatabase(unittest.TestCase):
         self.assertIsNotNone(acked)
         self.assertEqual(acked["status"], "REVIEWED")
         self.assertEqual(acked["acknowledged_by"], "user_elvis")
+
+        # test delete custom ping
+        self.db.delete_custom_reminder_ping(999111)
+        self.assertEqual(len(self.db.get_custom_reminder_pings("rem_ping_test")), 0)
 
     def test_get_all_pending_custom_reminders(self):
         # test pending reminder listing

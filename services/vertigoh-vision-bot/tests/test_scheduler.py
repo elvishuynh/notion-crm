@@ -294,7 +294,8 @@ class TestReviewScheduler(unittest.IsolatedAsyncioTestCase):
         updated = self.db.get_notion_item("page_overdue_rev:REVIEW")
         self.assertEqual(updated["stage"], 1)
 
-    async def test_check_escalations_due_edit_24h(self):
+    async def test_check_escalations_skips_edit_items(self):
+        # editors are never escalated
         t_past = datetime.now(timezone.utc) - timedelta(hours=25)
         self.db.record_notion_item(
             notion_page_id="page_overdue_edit",
@@ -313,19 +314,9 @@ class TestReviewScheduler(unittest.IsolatedAsyncioTestCase):
 
         await self.scheduler.check_escalations_once()
 
-        self.mock_bot.send_notion_escalation.assert_called_once_with(
-            channel_id=987654,
-            message_id=777002,
-            stage=0,
-            category="EDIT",
-            page_title="Overdue Edit Clip",
-            asset_url="https://vimeo.com/due_edit",
-            page_url="https://notion.so/due_edit",
-            assigned_users=["Elvis"],
-        )
-
+        self.mock_bot.send_notion_escalation.assert_not_called()
         updated = self.db.get_notion_item("page_overdue_edit:EDIT")
-        self.assertEqual(updated["stage"], 1)
+        self.assertEqual(updated["stage"], 0)
 
     async def test_check_escalations_due_post_24h(self):
         # test post 24h escalation
