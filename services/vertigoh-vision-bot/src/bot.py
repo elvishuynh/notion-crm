@@ -173,6 +173,40 @@ class VertigohVisionBot(commands.Bot):
                     ephemeral=True,
                 )
 
+        @self.tree.command(
+            name="purge",
+            description="Clean old bot messages in this channel while preserving active reminder cards",
+        )
+        @app_commands.describe(
+            limit="Maximum number of messages to scan (default: 100, max: 500)",
+        )
+        async def purge_slash(interaction: discord.Interaction, limit: Optional[int] = 100):
+            await interaction.response.defer(ephemeral=True)
+            scan_limit = min(max(limit or 100, 1), 500)
+            purged, preserved = await self.purge_channel_messages(interaction.channel, limit=scan_limit)
+            await interaction.followup.send(
+                f"🧹 **Purged {purged} old bot messages!**\n"
+                f"✅ Preserved {preserved} active reminder message(s).",
+                ephemeral=True,
+            )
+
+        @self.tree.command(
+            name="nuke",
+            description="Nuke all bot alert messages in this channel and resync fresh cards from Notion",
+        )
+        @app_commands.describe(
+            limit="Maximum number of messages to scan (default: 200, max: 500)",
+        )
+        async def nuke_slash(interaction: discord.Interaction, limit: Optional[int] = 200):
+            await interaction.response.defer(ephemeral=True)
+            scan_limit = min(max(limit or 200, 1), 500)
+            nuked = await self.nuke_channel_messages(interaction.channel, limit=scan_limit)
+            await interaction.followup.send(
+                f"💥 **Nuked {nuked} bot messages!**\n"
+                f"🔄 Cache cleared and active Notion schedule cards resynced.",
+                ephemeral=True,
+            )
+
     async def setup_hook(self):
         # sync commands to guild
         if self.guild_id:
@@ -1108,3 +1142,52 @@ class VertigohVisionBot(commands.Bot):
                     pass
         except Exception as e:
             logger.warning("Could not update acknowledged reminder message: %s", e)
+
+    async def purge_channel_messages(
+        self,
+        channel: Any,
+        limit: int = 100,
+    ) -> tuple[int, int]:
+        # purge old bot messages keeping active
+        if not hasattr(channel, "purge"):
+            return 0, 0
+
+        active_ids = self.db.get_active_message_ids()
+
+        def check(m: discord.Message) -> bool:
+            return self.user is not None and m.author.id == self.user.id and m.id not in active_ids
+
+        deleted = []
+        try:
+            deleted = await channel.purge(limit=limit, check=check, bulk=True)
+        except discord.Forbidden:
+            deleted = await channel.purge(limit=limit, check=check, bulk=False)
+        except Exception as e:
+            logger.error("Failed to purge channel messages: %s", e)
+
+        return len(deleted), len(active_ids)
+
+    async def nuke_channel_messages(
+        self,
+        channel: Any,
+        limit: int = 200,
+    ) -> int:
+        # nuke bot messages and resync
+        def check(m: discord.Message) -> bool:
+            return self.user is not None and m.author.id == self.user.id
+
+        deleted = []
+        if hasattr(channel, "purge"):
+            try:
+                deleted = await channel.purge(limit=limit, check=check, bulk=True)
+            except discord.Forbidden:
+                deleted = await channel.purge(limit=limit, check=check, bulk=False)
+            except Exception as e:
+                logger.error("Failed to nuke channel messages: %s", e)
+
+        # clear tracking and resync
+        self.db.clear_all_notion_items()
+        if self.scheduler:
+            await self.scheduler.poll_notion_once()
+
+        return len(deleted)

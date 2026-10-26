@@ -793,6 +793,95 @@ class TestVertigohVisionBot(unittest.IsolatedAsyncioTestCase):
         mock_reply_msg.reply.assert_called_once()
         self.assertIn("Task acknowledged", mock_reply_msg.reply.call_args.args[0])
 
+    async def test_purge_channel_messages_preserves_active(self):
+        # test purge preserving active cards
+        from unittest.mock import AsyncMock
+        self.bot._connection.user = MagicMock(id=999)
+        self.db.record_notion_item(
+            notion_page_id="active_purge_test",
+            category="REVIEW",
+            page_title="Active Video",
+            asset_url="https://vimeo.com/act",
+            notion_status="Review Pending",
+            assigned_users="Roger",
+            discord_channel_id=123,
+            discord_message_id=555,
+        )
+
+        mock_channel = MagicMock()
+        mock_channel.purge = AsyncMock(return_value=[MagicMock(), MagicMock()])
+
+        purged, preserved = await self.bot.purge_channel_messages(mock_channel, limit=100)
+
+        mock_channel.purge.assert_called_once()
+        check_fn = mock_channel.purge.call_args.kwargs["check"]
+
+        # active bot message is preserved
+        active_msg = MagicMock(author=MagicMock(id=999), id=555)
+        self.assertFalse(check_fn(active_msg))
+
+        # inactive bot message is purged
+        old_msg = MagicMock(author=MagicMock(id=999), id=111)
+        self.assertTrue(check_fn(old_msg))
+
+        # other user message is ignored
+        user_msg = MagicMock(author=MagicMock(id=888), id=222)
+        self.assertFalse(check_fn(user_msg))
+
+        self.assertEqual(purged, 2)
+        self.assertGreaterEqual(preserved, 1)
+
+    async def test_purge_channel_messages_fallback_on_forbidden(self):
+        # test fallback to non-bulk delete
+        import discord
+        from unittest.mock import AsyncMock
+        self.bot._connection.user = MagicMock(id=999)
+
+        mock_channel = MagicMock()
+        mock_response = MagicMock()
+        mock_response.status = 403
+        mock_channel.purge = AsyncMock(
+            side_effect=[
+                discord.Forbidden(mock_response, "Missing Permissions"),
+                [MagicMock()],
+            ]
+        )
+
+        purged, _ = await self.bot.purge_channel_messages(mock_channel, limit=50)
+        self.assertEqual(mock_channel.purge.call_count, 2)
+        self.assertEqual(purged, 1)
+
+    async def test_nuke_channel_messages_clears_db_and_resyncs(self):
+        # test full nuke and resync
+        from unittest.mock import AsyncMock
+        self.bot._connection.user = MagicMock(id=999)
+        self.db.record_notion_item(
+            notion_page_id="nuke_test",
+            category="REVIEW",
+            page_title="Nuke Video",
+            asset_url="https://vimeo.com/nuke",
+            notion_status="Review Pending",
+            assigned_users="Roger",
+            discord_channel_id=123,
+            discord_message_id=777,
+        )
+
+        mock_channel = MagicMock()
+        mock_channel.purge = AsyncMock(return_value=[MagicMock(), MagicMock(), MagicMock()])
+
+        mock_scheduler = MagicMock()
+        mock_scheduler.poll_notion_once = AsyncMock()
+        self.bot.scheduler = mock_scheduler
+
+        nuked = await self.bot.nuke_channel_messages(mock_channel, limit=200)
+
+        self.assertEqual(nuked, 3)
+        mock_channel.purge.assert_called_once()
+        # database cache should be empty
+        self.assertEqual(len(self.db.get_active_notion_items()), 0)
+        # resync should have been triggered
+        mock_scheduler.poll_notion_once.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

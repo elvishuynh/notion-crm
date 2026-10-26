@@ -401,6 +401,81 @@ class TestReviewDatabase(unittest.TestCase):
         self.assertEqual(len(pending_after), 1)
         self.assertEqual(pending_after[0]["reminder_id"], "rem_b")
 
+    def test_get_active_message_ids(self):
+        # test active message id collection
+        self.db.record_notion_item(
+            notion_page_id="active_p1",
+            category="REVIEW",
+            page_title="Active Review",
+            asset_url="https://vimeo.com/1",
+            notion_status="Review Pending",
+            assigned_users="Roger",
+            discord_channel_id=111,
+            discord_message_id=101,
+        )
+        self.db.record_notion_item_ping(
+            ping_message_id=102,
+            tracking_id="active_p1:REVIEW",
+            discord_message_id=101,
+        )
+        # resolved item should not be included
+        self.db.record_notion_item(
+            notion_page_id="resolved_p1",
+            category="POST",
+            page_title="Resolved Post",
+            asset_url="https://vimeo.com/2",
+            notion_status="Posted",
+            assigned_users="Roger",
+            discord_channel_id=111,
+            discord_message_id=103,
+        )
+        self.db.mark_notion_item_resolved("resolved_p1:POST")
+
+        self.db.record_custom_reminder(
+            reminder_id="rem_active",
+            message_text="Do task",
+            discord_guild_id=1,
+            discord_channel_id=111,
+            discord_message_id=201,
+            target_user_id="u1",
+            created_by_user_id="u2",
+        )
+        self.db.record_custom_reminder_ping(
+            ping_message_id=202,
+            reminder_id="rem_active",
+            discord_message_id=201,
+        )
+
+        active_ids = self.db.get_active_message_ids()
+        self.assertIn(101, active_ids)
+        self.assertIn(102, active_ids)
+        self.assertIn(201, active_ids)
+        self.assertIn(202, active_ids)
+        self.assertNotIn(103, active_ids)
+
+    def test_clear_all_notion_items(self):
+        # test clearing notion cache
+        self.db.record_notion_item(
+            notion_page_id="clear_p1",
+            category="REVIEW",
+            page_title="Clip",
+            asset_url="https://vimeo.com/c1",
+            notion_status="Review Pending",
+            assigned_users="Roger",
+            discord_channel_id=111,
+            discord_message_id=999,
+        )
+        self.db.record_notion_item_ping(
+            ping_message_id=888,
+            tracking_id="clear_p1:REVIEW",
+            discord_message_id=999,
+        )
+        self.assertEqual(len(self.db.get_active_notion_items()), 1)
+
+        self.db.clear_all_notion_items()
+        self.assertEqual(len(self.db.get_active_notion_items()), 0)
+        self.assertEqual(len(self.db.get_notion_item_pings("clear_p1:REVIEW")), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

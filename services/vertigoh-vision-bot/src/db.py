@@ -1,7 +1,7 @@
 import sqlite3
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Set
 
 
 def get_current_utc() -> datetime:
@@ -992,3 +992,55 @@ class ReviewDatabase:
                 (discord_message_id,),
             ).fetchone()
             return dict(ping_row) if ping_row else None
+
+    def get_active_message_ids(self) -> Set[int]:
+        # fetch active message ids
+        with self._get_connection() as conn:
+            ids = set()
+            rows = conn.execute(
+                "SELECT discord_message_id FROM tracked_notion_items WHERE status = 'PENDING' AND discord_message_id IS NOT NULL;"
+            ).fetchall()
+            ids.update(r[0] for r in rows if r[0])
+
+            rows = conn.execute(
+                """
+                SELECT p.ping_message_id FROM tracked_notion_pings p
+                JOIN tracked_notion_items i ON p.tracking_id = i.tracking_id
+                WHERE i.status = 'PENDING';
+                """
+            ).fetchall()
+            ids.update(r[0] for r in rows if r[0])
+
+            rows = conn.execute(
+                "SELECT discord_message_id FROM custom_reminders WHERE status = 'PENDING' AND discord_message_id IS NOT NULL;"
+            ).fetchall()
+            ids.update(r[0] for r in rows if r[0])
+
+            rows = conn.execute(
+                """
+                SELECT p.ping_message_id FROM custom_reminder_pings p
+                JOIN custom_reminders r ON p.reminder_id = r.reminder_id
+                WHERE r.status = 'PENDING';
+                """
+            ).fetchall()
+            ids.update(r[0] for r in rows if r[0])
+
+            try:
+                rows = conn.execute(
+                    "SELECT discord_message_id FROM tracked_assets WHERE status = 'PENDING' AND discord_message_id IS NOT NULL;"
+                ).fetchall()
+                ids.update(r[0] for r in rows if r[0])
+            except Exception:
+                pass
+
+            return ids
+
+    def clear_all_notion_items(self):
+        # clear notion tracking records
+        with self._get_connection() as conn:
+            conn.execute("DELETE FROM tracked_notion_pings;")
+            conn.execute("DELETE FROM tracked_notion_items;")
+            try:
+                conn.execute("DELETE FROM tracked_assets;")
+            except Exception:
+                pass
